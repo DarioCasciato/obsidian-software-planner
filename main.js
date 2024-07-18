@@ -12,7 +12,7 @@ const DEFAULT_SETTINGS = {
 };
 
 // Utility function to copy folders
-async function copyFolder(src, dest, vaultBasePath) {
+async function copyFolder(src, dest) {
     if (!fs.existsSync(dest)) {
         fs.mkdirSync(dest, { recursive: true });
     }
@@ -25,7 +25,7 @@ async function copyFolder(src, dest, vaultBasePath) {
         console.log('Copying:', srcPath, 'to', destPath);
 
         if (entry.isDirectory()) {
-            await copyFolder(srcPath, destPath, vaultBasePath);
+            await copyFolder(srcPath, destPath);
         } else {
             fs.copyFileSync(srcPath, destPath);
         }
@@ -163,7 +163,7 @@ class SoftwarePlanner extends Plugin {
         const templatePath = path.join(this.app.vault.adapter.basePath, this.settings.customerTemplatePath);
 
         try {
-            await copyFolder(templatePath, customerPath, this.app.vault.adapter.basePath);
+            await copyFolder(templatePath, customerPath);
             new Notice(`Customer folder created: ${customerName}`);
         } catch (error) {
             console.error(`Error creating customer folder: ${error.message}`);
@@ -172,14 +172,14 @@ class SoftwarePlanner extends Plugin {
     }
 
     async createNewRemoteDay() {
-        const remoteDay = await this.promptUser('Enter remote day (YYYY-MM-DD)');
+        const remoteDay = await this.promptDate('Enter remote day (YYYY-MM-DD)');
         if (!remoteDay) return;
 
         const remoteDayPath = path.join(this.app.vault.adapter.basePath, this.settings.remoteDayDestinationPath, remoteDay);
         const templatePath = path.join(this.app.vault.adapter.basePath, this.settings.remoteDayTemplatePath);
 
         try {
-            await copyFolder(templatePath, remoteDayPath, this.app.vault.adapter.basePath);
+            await copyFolder(templatePath, remoteDayPath);
             new Notice(`Remote day folder created: ${remoteDay}`);
         } catch (error) {
             console.error(`Error creating remote day folder: ${error.message}`);
@@ -190,6 +190,13 @@ class SoftwarePlanner extends Plugin {
     async promptUser(promptText) {
         return new Promise((resolve) => {
             const modal = new PromptModal(this.app, promptText, resolve);
+            modal.open();
+        });
+    }
+
+    async promptDate(promptText) {
+        return new Promise((resolve) => {
+            const modal = new DatePromptModal(this.app, promptText, resolve);
             modal.open();
         });
     }
@@ -220,6 +227,43 @@ class PromptModal extends Modal {
         const buttonEl = contentEl.createEl('button', { text: 'OK' });
         buttonEl.addEventListener('click', () => {
             this.callback(inputEl.value);
+            this.close();
+        });
+    }
+
+    onClose() {
+        const { contentEl } = this;
+        contentEl.empty();
+    }
+}
+
+// DatePromptModal class
+class DatePromptModal extends Modal {
+    constructor(app, promptText, callback) {
+        super(app);
+        this.promptText = promptText;
+        this.callback = callback;
+    }
+
+    onOpen() {
+        const { contentEl } = this;
+        contentEl.createEl('h2', { text: this.promptText });
+
+        const inputEl = contentEl.createEl('input', { type: 'date' });
+        inputEl.focus();
+
+        inputEl.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter') {
+                const dateValue = inputEl.value;
+                this.callback(dateValue);
+                this.close();
+            }
+        });
+
+        const buttonEl = contentEl.createEl('button', { text: 'OK' });
+        buttonEl.addEventListener('click', () => {
+            const dateValue = inputEl.value;
+            this.callback(dateValue);
             this.close();
         });
     }
