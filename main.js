@@ -1,6 +1,7 @@
 const { Plugin, PluginSettingTab, Setting, Notice, Modal } = require('obsidian');
 const { remote } = require('electron');
 const path = require('path');
+const fs = require('fs'); // Verwenden des nativen fs-Moduls von Node.js
 
 // Default settings
 const DEFAULT_SETTINGS = {
@@ -9,6 +10,27 @@ const DEFAULT_SETTINGS = {
     remoteDayTemplatePath: '',
     remoteDayDestinationPath: ''
 };
+
+// Utility function to copy folders
+async function copyFolder(src, dest, vaultBasePath) {
+    if (!fs.existsSync(dest)) {
+        fs.mkdirSync(dest, { recursive: true });
+    }
+
+    const entries = fs.readdirSync(src, { withFileTypes: true });
+
+    for (let entry of entries) {
+        const srcPath = path.join(src, entry.name);
+        const destPath = path.join(dest, entry.name);
+        console.log('Copying:', srcPath, 'to', destPath);
+
+        if (entry.isDirectory()) {
+            await copyFolder(srcPath, destPath, vaultBasePath);
+        } else {
+            fs.copyFileSync(srcPath, destPath);
+        }
+    }
+}
 
 // Settings tab
 class SoftwarePlannerSettingTab extends PluginSettingTab {
@@ -80,9 +102,13 @@ class SoftwarePlannerSettingTab extends PluginSettingTab {
 
         const customerTemplatePath = path.join(vaultPath, this.plugin.settings.customerTemplatePath);
         const customerDestinationPath = path.join(vaultPath, this.plugin.settings.customerDestinationPath);
+        const remoteDayTemplatePath = path.join(vaultPath, this.plugin.settings.remoteDayTemplatePath);
+        const remoteDayDestinationPath = path.join(vaultPath, this.plugin.settings.remoteDayDestinationPath);
 
         console.log('Customer Template Path:', customerTemplatePath);
         console.log('Customer Destination Path:', customerDestinationPath);
+        console.log('Remote Day Template Path:', remoteDayTemplatePath);
+        console.log('Remote Day Destination Path:', remoteDayDestinationPath);
 
         new Notice('Paths printed to console');
     }
@@ -121,21 +147,43 @@ class SoftwarePlanner extends Plugin {
             name: 'Neuer Kunde erstellen',
             callback: () => this.createNewCustomer()
         });
+
+        this.addCommand({
+            id: 'create-new-remote-day',
+            name: 'Neuen Remote-Tag erstellen',
+            callback: () => this.createNewRemoteDay()
+        });
     }
 
     async createNewCustomer() {
         const customerName = await this.promptUser('Enter customer name');
         if (!customerName) return;
 
-        const customerPath = path.join(this.settings.customerDestinationPath, customerName);
+        const customerPath = path.join(this.app.vault.adapter.basePath, this.settings.customerDestinationPath, customerName);
         const templatePath = path.join(this.app.vault.adapter.basePath, this.settings.customerTemplatePath);
 
         try {
-            await this.createFolderFromTemplate(customerPath, templatePath);
+            await copyFolder(templatePath, customerPath, this.app.vault.adapter.basePath);
             new Notice(`Customer folder created: ${customerName}`);
         } catch (error) {
             console.error(`Error creating customer folder: ${error.message}`);
             new Notice(`Error creating customer folder: ${error.message}`);
+        }
+    }
+
+    async createNewRemoteDay() {
+        const remoteDay = await this.promptUser('Enter remote day (YYYY-MM-DD)');
+        if (!remoteDay) return;
+
+        const remoteDayPath = path.join(this.app.vault.adapter.basePath, this.settings.remoteDayDestinationPath, remoteDay);
+        const templatePath = path.join(this.app.vault.adapter.basePath, this.settings.remoteDayTemplatePath);
+
+        try {
+            await copyFolder(templatePath, remoteDayPath, this.app.vault.adapter.basePath);
+            new Notice(`Remote day folder created: ${remoteDay}`);
+        } catch (error) {
+            console.error(`Error creating remote day folder: ${error.message}`);
+            new Notice(`Error creating remote day folder: ${error.message}`);
         }
     }
 
@@ -144,38 +192,6 @@ class SoftwarePlanner extends Plugin {
             const modal = new PromptModal(this.app, promptText, resolve);
             modal.open();
         });
-    }
-
-    async createFolderFromTemplate(destinationPath, templatePath) {
-        console.log('Creating folder at:', destinationPath);
-        console.log('Using template at:', templatePath);
-
-        // Create destination folder if it does not exist
-        if (!await this.app.vault.adapter.exists(destinationPath)) {
-            console.log('CREATING DESTINATION FOLDER AT:', destinationPath);
-            await this.app.vault.adapter.mkdir(destinationPath);
-        }
-
-        // Copy files and folders from template to destination
-        const templateFiles = await this.app.vault.adapter.list(templatePath);
-        console.log('Template files:', templateFiles);
-
-        for (const file of templateFiles.files) {
-            const relativeFilePath = path.relative(templatePath, file);
-            const destinationFilePath = path.join(destinationPath, relativeFilePath);
-            console.log('Copying file from:', file, 'to:', destinationFilePath);
-            await this.app.vault.adapter.copy(file, destinationFilePath);
-        }
-
-        for (const folder of templateFiles.folders) {
-            const relativeFolderPath = path.relative(templatePath, folder);
-            const destinationFolderPath = path.join(destinationPath, relativeFolderPath);
-            if (!await this.app.vault.adapter.exists(destinationFolderPath)) {
-                console.log('CREATING FOLDER AT:', destinationFolderPath);
-                await this.app.vault.adapter.mkdir(destinationFolderPath);
-            }
-            await this.createFolderFromTemplate(destinationFolderPath, folder);
-        }
     }
 }
 
