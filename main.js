@@ -80,13 +80,9 @@ class SoftwarePlannerSettingTab extends PluginSettingTab {
 
         const customerTemplatePath = path.join(vaultPath, this.plugin.settings.customerTemplatePath);
         const customerDestinationPath = path.join(vaultPath, this.plugin.settings.customerDestinationPath);
-        const remoteDayTemplatePath = path.join(vaultPath, this.plugin.settings.remoteDayTemplatePath);
-        const remoteDayDestinationPath = path.join(vaultPath, this.plugin.settings.remoteDayDestinationPath);
 
         console.log('Customer Template Path:', customerTemplatePath);
         console.log('Customer Destination Path:', customerDestinationPath);
-        console.log('Remote Day Template Path:', remoteDayTemplatePath);
-        console.log('Remote Day Destination Path:', remoteDayDestinationPath);
 
         new Notice('Paths printed to console');
     }
@@ -125,12 +121,6 @@ class SoftwarePlanner extends Plugin {
             name: 'Neuer Kunde erstellen',
             callback: () => this.createNewCustomer()
         });
-
-        this.addCommand({
-            id: 'create-new-remote-day',
-            name: 'Neuen Remote-Tag erstellen',
-            callback: () => this.createNewRemoteDay()
-        });
     }
 
     async createNewCustomer() {
@@ -146,22 +136,6 @@ class SoftwarePlanner extends Plugin {
         } catch (error) {
             console.error(`Error creating customer folder: ${error.message}`);
             new Notice(`Error creating customer folder: ${error.message}`);
-        }
-    }
-
-    async createNewRemoteDay() {
-        const remoteDay = await this.promptUser('Enter remote day (YYYY-MM-DD)');
-        if (!remoteDay) return;
-
-        const remoteDayPath = path.join(this.settings.remoteDayDestinationPath, remoteDay);
-        const templatePath = path.join(this.app.vault.adapter.basePath, this.settings.remoteDayTemplatePath);
-
-        try {
-            await this.createFolderFromTemplate(remoteDayPath, templatePath);
-            new Notice(`Remote day folder created: ${remoteDay}`);
-        } catch (error) {
-            console.error(`Error creating remote day folder: ${error.message}`);
-            new Notice(`Error creating remote day folder: ${error.message}`);
         }
     }
 
