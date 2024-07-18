@@ -34,6 +34,14 @@ async function copyFolder(src, dest) {
     }
 }
 
+// Utility function to get existing folders
+function getExistingFolders(basePath) {
+    if (!fs.existsSync(basePath)) return [];
+    return fs.readdirSync(basePath, { withFileTypes: true })
+        .filter(entry => entry.isDirectory())
+        .map(entry => entry.name);
+}
+
 // Settings tab
 class SoftwarePlannerSettingTab extends PluginSettingTab {
     constructor(app, plugin) {
@@ -208,7 +216,8 @@ class SoftwarePlanner extends Plugin {
     }
 
     async createNewDeployment() {
-        const customerName = await this.promptUser('Enter customer name');
+        const customers = getExistingFolders(path.join(this.app.vault.adapter.basePath, this.settings.customerDestinationPath));
+        const customerName = await this.promptDropdown('Select customer', customers);
         if (!customerName) return;
 
         const deploymentDate = await this.promptDate('Enter deployment date (YYYY-MM-DD)');
@@ -227,7 +236,8 @@ class SoftwarePlanner extends Plugin {
     }
 
     async createNewRemoteTask() {
-        const remoteDay = await this.promptUser('Enter remote day (YYYY-MM-DD)');
+        const remoteDays = getExistingFolders(path.join(this.app.vault.adapter.basePath, this.settings.remoteDayDestinationPath));
+        const remoteDay = await this.promptDropdown('Select remote day', remoteDays);
         if (!remoteDay) return;
 
         const taskName = await this.promptUser('Enter task name');
@@ -255,6 +265,13 @@ class SoftwarePlanner extends Plugin {
     async promptDate(promptText) {
         return new Promise((resolve) => {
             const modal = new DatePromptModal(this.app, promptText, resolve);
+            modal.open();
+        });
+    }
+
+    async promptDropdown(promptText, options) {
+        return new Promise((resolve) => {
+            const modal = new DropdownModal(this.app, promptText, options, resolve);
             modal.open();
         });
     }
@@ -331,5 +348,99 @@ class DatePromptModal extends Modal {
         contentEl.empty();
     }
 }
+
+class DropdownModal extends Modal {
+    constructor(app, promptText, options, callback) {
+        super(app);
+        this.promptText = promptText;
+        this.options = options;
+        this.callback = callback;
+    }
+
+    onOpen() {
+        const { contentEl } = this;
+        contentEl.createEl('h2', { text: this.promptText });
+
+        // Create container for input and dropdown
+        const containerEl = contentEl.createEl('div', { cls: 'dropdown-container' });
+
+        // Create input element
+        const inputEl = containerEl.createEl('input', { type: 'text', cls: 'dropdown-input' });
+        inputEl.focus();
+
+        // Create dropdown element
+        const dropdownEl = containerEl.createEl('select', { cls: 'dropdown' });
+        dropdownEl.size = this.options.length > 10 ? 10 : this.options.length;
+
+        this.options.forEach(option => {
+            const optionEl = dropdownEl.createEl('option', { text: option });
+            optionEl.value = option;
+        });
+
+        // Filter options based on input
+        inputEl.addEventListener('input', () => {
+            const filter = inputEl.value.toLowerCase();
+            for (let i = 0; i < dropdownEl.options.length; i++) {
+                const option = dropdownEl.options[i];
+                option.style.display = option.text.toLowerCase().includes(filter) ? '' : 'none';
+            }
+        });
+
+        // Handle enter key and button click
+        inputEl.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter') {
+                this.callback(dropdownEl.value);
+                this.close();
+            }
+        });
+
+        const buttonEl = containerEl.createEl('button', { text: 'OK', cls: 'dropdown-button' });
+        buttonEl.addEventListener('click', () => {
+            this.callback(dropdownEl.value);
+            this.close();
+        });
+
+        // Append elements to contentEl
+        contentEl.appendChild(containerEl);
+    }
+
+    onClose() {
+        const { contentEl } = this;
+        contentEl.empty();
+    }
+}
+
+// CSS to ensure dropdown is below input
+const style = document.createElement('style');
+style.textContent = `
+.dropdown-container {
+    display: flex;
+    flex-direction: column;
+    position: relative;
+    width: 100%;
+}
+
+.dropdown-input {
+    margin-bottom: 5px;
+    width: 100%;
+    box-sizing: border-box;
+    padding: 5px;
+}
+
+.dropdown {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 5px;
+    margin-bottom: 10px;
+    min-height: 50px;
+}
+
+.dropdown-button {
+    align-self: center;
+    padding: 5px 10px;
+}
+`;
+document.head.appendChild(style);
+
 
 module.exports = SoftwarePlanner;
