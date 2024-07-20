@@ -1,7 +1,8 @@
 const { Plugin, PluginSettingTab, Setting, Notice, Modal } = require('obsidian');
 const { remote } = require('electron');
 const path = require('path');
-const fs = require('fs'); // Verwenden des nativen fs-Moduls von Node.js
+const fs = require('fs');
+const { exec } = require('child_process');
 
 // Default settings
 const DEFAULT_SETTINGS = {
@@ -10,37 +11,9 @@ const DEFAULT_SETTINGS = {
     remoteDayTemplatePath: '',
     remoteDayDestinationPath: '',
     deploymentTemplatePath: '',
-    remoteTaskTemplatePath: ''
+    remoteTaskTemplatePath: '',
+    xmlProgramPath: '' // Neue Einstellung für den Pfad zum externen Programm
 };
-
-// Utility function to copy folders
-async function copyFolder(src, dest) {
-    if (!fs.existsSync(dest)) {
-        fs.mkdirSync(dest, { recursive: true });
-    }
-
-    const entries = fs.readdirSync(src, { withFileTypes: true });
-
-    for (let entry of entries) {
-        const srcPath = path.join(src, entry.name);
-        const destPath = path.join(dest, entry.name);
-        console.log('Copying:', srcPath, 'to', destPath);
-
-        if (entry.isDirectory()) {
-            await copyFolder(srcPath, destPath);
-        } else {
-            fs.copyFileSync(srcPath, destPath);
-        }
-    }
-}
-
-// Utility function to get existing folders
-function getExistingFolders(basePath) {
-    if (!fs.existsSync(basePath)) return [];
-    return fs.readdirSync(basePath, { withFileTypes: true })
-        .filter(entry => entry.isDirectory())
-        .map(entry => entry.name);
-}
 
 // Settings tab
 class SoftwarePlannerSettingTab extends PluginSettingTab {
@@ -68,6 +41,34 @@ class SoftwarePlannerSettingTab extends PluginSettingTab {
         this.addPathSetting(containerEl, 'Remote Day Template Path', 'remoteDayTemplatePath');
         this.addPathSetting(containerEl, 'Remote Day Destination Path', 'remoteDayDestinationPath');
         this.addPathSetting(containerEl, 'Remote Task Template Path', 'remoteTaskTemplatePath');
+
+        // XML Program Path
+        containerEl.createEl('h3', { text: 'XML Program Path' });
+
+        new Setting(containerEl)
+            .setName('XML Program Path')
+            .setDesc('Path to the program that opens XML files')
+            .addText(text => text
+                .setPlaceholder('Enter the path')
+                .setValue(this.plugin.settings.xmlProgramPath || '')
+                .onChange(async (value) => {
+                    this.plugin.settings.xmlProgramPath = value;
+                    await this.plugin.saveSettings();
+                }))
+            .addButton(button => button
+                .setButtonText('Browse')
+                .setCta()
+                .onClick(async () => {
+                    const result = await remote.dialog.showOpenDialog({
+                        properties: ['openFile']
+                    });
+                    if (!result.canceled) {
+                        const selectedPath = result.filePaths[0];
+                        this.plugin.settings.xmlProgramPath = selectedPath;
+                        await this.plugin.saveSettings();
+                        this.display(); // Refresh the settings to show updated path
+                    }
+                }));
 
         // Add a button to print the paths to the developer console
         new Setting(containerEl)
@@ -118,6 +119,7 @@ class SoftwarePlannerSettingTab extends PluginSettingTab {
         const remoteDayDestinationPath = path.join(vaultPath, this.plugin.settings.remoteDayDestinationPath);
         const deploymentTemplatePath = path.join(vaultPath, this.plugin.settings.deploymentTemplatePath);
         const remoteTaskTemplatePath = path.join(vaultPath, this.plugin.settings.remoteTaskTemplatePath);
+        const xmlProgramPath = this.plugin.settings.xmlProgramPath;
 
         console.log('Customer Template Path:', customerTemplatePath);
         console.log('Customer Destination Path:', customerDestinationPath);
@@ -125,6 +127,7 @@ class SoftwarePlannerSettingTab extends PluginSettingTab {
         console.log('Remote Day Destination Path:', remoteDayDestinationPath);
         console.log('Deployment Template Path:', deploymentTemplatePath);
         console.log('Remote Task Template Path:', remoteTaskTemplatePath);
+        console.log('XML Program Path:', xmlProgramPath);
 
         new Notice('Paths printed to console');
     }
@@ -143,6 +146,13 @@ class SoftwarePlanner extends Plugin {
 
         // Register commands
         this.registerCommands();
+
+        // Add event listener for XML files
+        this.registerEvent(this.app.workspace.on('file-open', (file) => {
+            if (file.extension === 'xml') {
+                this.openXmlFileExternally(file.path);
+            }
+        }));
     }
 
     onunload() {
@@ -237,7 +247,7 @@ class SoftwarePlanner extends Plugin {
 
     async createNewRemoteTask() {
         const remoteDays = getExistingFolders(path.join(this.app.vault.adapter.basePath, this.settings.remoteDayDestinationPath));
-        const remoteDay = await this.promptDropdown('Select remote day', remoteDays);
+        const remoteDay = await this.promptDropdown('Select remote day', remoteDays, true, (date) => remoteDays.includes(date));
         if (!remoteDay) return;
 
         const taskName = await this.promptUser('Enter task name');
@@ -245,9 +255,14 @@ class SoftwarePlanner extends Plugin {
 
         const remoteTaskPath = path.join(this.app.vault.adapter.basePath, this.settings.remoteDayDestinationPath, remoteDay, taskName);
         const templatePath = path.join(this.app.vault.adapter.basePath, this.settings.remoteTaskTemplatePath);
+        const schedulePath = path.join(this.app.vault.adapter.basePath, this.settings.remoteDayDestinationPath, remoteDay, 'Zeitplan.md');
+        const taskFilePath = path.join(remoteTaskPath, 'Auftrag.md');
+        const taskFileTemplatePath = path.join(templatePath, 'Auftrag.md');
 
         try {
             await copyFolder(templatePath, remoteTaskPath);
+            await addTaskToSchedule(schedulePath, taskName);
+            await createUpdatedTaskFile(taskFileTemplatePath, taskFilePath, taskName);
             new Notice(`Remote task folder created for ${taskName} on ${remoteDay}`);
         } catch (error) {
             console.error(`Error creating remote task folder: ${error.message}`);
@@ -269,10 +284,24 @@ class SoftwarePlanner extends Plugin {
         });
     }
 
-    async promptDropdown(promptText, options) {
+    async promptDropdown(promptText, options, showTodayButton = false, validateTodayCallback = null) {
         return new Promise((resolve) => {
-            const modal = new DropdownModal(this.app, promptText, options, resolve);
+            const modal = new DropdownModal(this.app, promptText, options, resolve, showTodayButton, validateTodayCallback);
             modal.open();
+        });
+    }
+
+    async openXmlFileExternally(filePath) {
+        if (!this.settings.xmlProgramPath) {
+            new Notice('XML Program Path is not set in the settings.');
+            return;
+        }
+
+        const fullPath = path.join(this.app.vault.adapter.basePath, filePath);
+        exec(`"${this.settings.xmlProgramPath}" "${fullPath}"`, (error) => {
+            if (error) {
+                new Notice(`Failed to open XML file: ${error.message}`);
+            }
         });
     }
 }
@@ -324,7 +353,18 @@ class DatePromptModal extends Modal {
         const { contentEl } = this;
         contentEl.createEl('h2', { text: this.promptText });
 
-        const inputEl = contentEl.createEl('input', { type: 'date' });
+        // Create container for buttons and input
+        const containerEl = contentEl.createEl('div', { cls: 'date-container' });
+
+        const todayButtonEl = containerEl.createEl('button', { text: 'Heute', cls: 'date-button' });
+        todayButtonEl.addEventListener('click', () => {
+            const today = new Date().toISOString().split('T')[0];
+            inputEl.value = today;
+            this.callback(today);
+            this.close();
+        });
+
+        const inputEl = containerEl.createEl('input', { type: 'date', cls: 'date-input' });
         inputEl.focus();
 
         inputEl.addEventListener('keydown', (event) => {
@@ -335,12 +375,15 @@ class DatePromptModal extends Modal {
             }
         });
 
-        const buttonEl = contentEl.createEl('button', { text: 'OK' });
-        buttonEl.addEventListener('click', () => {
+        const okButtonEl = containerEl.createEl('button', { text: 'OK', cls: 'date-button' });
+        okButtonEl.addEventListener('click', () => {
             const dateValue = inputEl.value;
             this.callback(dateValue);
             this.close();
         });
+
+        // Append elements to contentEl
+        contentEl.appendChild(containerEl);
     }
 
     onClose() {
@@ -349,12 +392,15 @@ class DatePromptModal extends Modal {
     }
 }
 
+// DropdownModal class
 class DropdownModal extends Modal {
-    constructor(app, promptText, options, callback) {
+    constructor(app, promptText, options, callback, showTodayButton = false, validateTodayCallback = null) {
         super(app);
         this.promptText = promptText;
         this.options = options;
         this.callback = callback;
+        this.showTodayButton = showTodayButton;
+        this.validateTodayCallback = validateTodayCallback;
     }
 
     onOpen() {
@@ -363,6 +409,19 @@ class DropdownModal extends Modal {
 
         // Create container for input and dropdown
         const containerEl = contentEl.createEl('div', { cls: 'dropdown-container' });
+
+        if (this.showTodayButton) {
+            const todayButtonEl = containerEl.createEl('button', { text: 'Heute', cls: 'dropdown-button' });
+            todayButtonEl.addEventListener('click', () => {
+                const today = new Date().toISOString().split('T')[0];
+                if (this.validateTodayCallback && this.validateTodayCallback(today)) {
+                    this.callback(today);
+                    this.close();
+                } else {
+                    new Notice('Remote-Tag für heute existiert nicht.');
+                }
+            });
+        }
 
         // Create input element
         const inputEl = containerEl.createEl('input', { type: 'text', cls: 'dropdown-input' });
@@ -410,9 +469,24 @@ class DropdownModal extends Modal {
     }
 }
 
-// CSS to ensure dropdown is below input
+// CSS to ensure the buttons and input are stacked and have margin
 const style = document.createElement('style');
 style.textContent = `
+.date-container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    width: 100%;
+}
+
+.date-input, .date-button {
+    margin-bottom: 15px;
+    width: 100%;
+    box-sizing: border-box;
+    padding: 5px;
+    text-align: center;
+}
+
 .dropdown-container {
     display: flex;
     flex-direction: column;
@@ -432,15 +506,15 @@ style.textContent = `
     box-sizing: border-box;
     padding: 5px;
     margin-bottom: 10px;
-    min-height: 50px;
+    min-height: 100px; /* Set a minimum height for the dropdown */
 }
 
 .dropdown-button {
     align-self: center;
     padding: 5px 10px;
+    margin-bottom: 5px; /* Add margin to separate buttons */
 }
 `;
 document.head.appendChild(style);
-
 
 module.exports = SoftwarePlanner;
