@@ -12,8 +12,59 @@ const DEFAULT_SETTINGS = {
     remoteDayDestinationPath: '',
     deploymentTemplatePath: '',
     remoteTaskTemplatePath: '',
-    xmlProgramPath: '' // Neue Einstellung für den Pfad zum externen Programm
+    xmlProgramPath: ''
 };
+
+// Utility function to copy folders
+async function copyFolder(src, dest) {
+    if (!fs.existsSync(dest)) {
+        fs.mkdirSync(dest, { recursive: true });
+    }
+
+    const entries = fs.readdirSync(src, { withFileTypes: true });
+
+    for (let entry of entries) {
+        const srcPath = path.join(src, entry.name);
+        const destPath = path.join(dest, entry.name);
+        console.log('Copying:', srcPath, 'to', destPath);
+
+        if (entry.isDirectory()) {
+            await copyFolder(srcPath, destPath);
+        } else {
+            fs.copyFileSync(srcPath, destPath);
+        }
+    }
+}
+
+// Utility function to get existing folders
+function getExistingFolders(basePath) {
+    if (!fs.existsSync(basePath)) return [];
+    return fs.readdirSync(basePath, { withFileTypes: true })
+        .filter(entry => entry.isDirectory())
+        .map(entry => entry.name);
+}
+
+// Utility function to add task to schedule
+async function addTaskToSchedule(schedulePath, taskName) {
+    let scheduleContent = await fs.promises.readFile(schedulePath, 'utf8');
+    const taskEntry = `- [ ] ${taskName}\n`;
+
+    const taskSection = '## Aufträge\n\n';
+    const insertIndex = scheduleContent.indexOf(taskSection) + taskSection.length;
+    if (insertIndex === -1) {
+        throw new Error('Task section not found in schedule');
+    }
+
+    scheduleContent = scheduleContent.slice(0, insertIndex) + taskEntry + scheduleContent.slice(insertIndex);
+    await fs.promises.writeFile(schedulePath, scheduleContent, 'utf8');
+}
+
+// Utility function to create and update the task file
+async function createUpdatedTaskFile(templatePath, destinationPath, customerName) {
+    let taskContent = await fs.promises.readFile(templatePath, 'utf8');
+    taskContent = taskContent.replace('**Kunde**:', `**Kunde**: ${customerName}`);
+    await fs.promises.writeFile(destinationPath, taskContent, 'utf8');
+}
 
 // Settings tab
 class SoftwarePlannerSettingTab extends PluginSettingTab {
@@ -43,32 +94,9 @@ class SoftwarePlannerSettingTab extends PluginSettingTab {
         this.addPathSetting(containerEl, 'Remote Task Template Path', 'remoteTaskTemplatePath');
 
         // XML Program Path
-        containerEl.createEl('h3', { text: 'XML Program Path' });
+        containerEl.createEl('h3', { text: 'XML Program Settings' });
 
-        new Setting(containerEl)
-            .setName('XML Program Path')
-            .setDesc('Path to the program that opens XML files')
-            .addText(text => text
-                .setPlaceholder('Enter the path')
-                .setValue(this.plugin.settings.xmlProgramPath || '')
-                .onChange(async (value) => {
-                    this.plugin.settings.xmlProgramPath = value;
-                    await this.plugin.saveSettings();
-                }))
-            .addButton(button => button
-                .setButtonText('Browse')
-                .setCta()
-                .onClick(async () => {
-                    const result = await remote.dialog.showOpenDialog({
-                        properties: ['openFile']
-                    });
-                    if (!result.canceled) {
-                        const selectedPath = result.filePaths[0];
-                        this.plugin.settings.xmlProgramPath = selectedPath;
-                        await this.plugin.saveSettings();
-                        this.display(); // Refresh the settings to show updated path
-                    }
-                }));
+        this.addPathSetting(containerEl, 'XML Program Path', 'xmlProgramPath');
 
         // Add a button to print the paths to the developer console
         new Setting(containerEl)
@@ -96,7 +124,7 @@ class SoftwarePlannerSettingTab extends PluginSettingTab {
                 .setCta()
                 .onClick(async () => {
                     const result = await remote.dialog.showOpenDialog({
-                        properties: ['openDirectory']
+                        properties: ['openFile']
                     });
                     if (!result.canceled) {
                         const selectedPath = result.filePaths[0];
@@ -119,7 +147,7 @@ class SoftwarePlannerSettingTab extends PluginSettingTab {
         const remoteDayDestinationPath = path.join(vaultPath, this.plugin.settings.remoteDayDestinationPath);
         const deploymentTemplatePath = path.join(vaultPath, this.plugin.settings.deploymentTemplatePath);
         const remoteTaskTemplatePath = path.join(vaultPath, this.plugin.settings.remoteTaskTemplatePath);
-        const xmlProgramPath = this.plugin.settings.xmlProgramPath;
+        const xmlProgramPath = path.join(vaultPath, this.plugin.settings.xmlProgramPath);
 
         console.log('Customer Template Path:', customerTemplatePath);
         console.log('Customer Destination Path:', customerDestinationPath);
@@ -147,12 +175,8 @@ class SoftwarePlanner extends Plugin {
         // Register commands
         this.registerCommands();
 
-        // Add event listener for XML files
-        this.registerEvent(this.app.workspace.on('file-open', (file) => {
-            if (file.extension === 'xml') {
-                this.openXmlFileExternally(file.path);
-            }
-        }));
+        // Add XML file extension support
+        this.addXMLFileExtension();
     }
 
     onunload() {
@@ -291,18 +315,37 @@ class SoftwarePlanner extends Plugin {
         });
     }
 
-    async openXmlFileExternally(filePath) {
-        if (!this.settings.xmlProgramPath) {
-            new Notice('XML Program Path is not set in the settings.');
+    // Add XML file extension support
+    addXMLFileExtension() {
+        this.registerExtensions(['xml'], 'markdown');
+
+        this.registerEvent(
+            this.app.workspace.on('file-open', (file) => {
+                if (file && file.extension === 'xml') {
+                    this.showXMLConfirmDialog(file);
+                }
+            })
+        );
+    }
+
+    // Show confirmation dialog to open XML file
+    showXMLConfirmDialog(file) {
+        const xmlProgramPath = this.settings.xmlProgramPath;
+        if (!xmlProgramPath) {
+            new Notice('No program set for opening XML files. Please set the XML Program Path in the plugin settings.');
             return;
         }
 
-        const fullPath = path.join(this.app.vault.adapter.basePath, filePath);
-        exec(`"${this.settings.xmlProgramPath}" "${fullPath}"`, (error) => {
-            if (error) {
-                new Notice(`Failed to open XML file: ${error.message}`);
-            }
+        const filePath = path.join(this.app.vault.adapter.basePath, file.path);
+        const modal = new ConfirmModal(this.app, 'XML öffnen im XML Visualizer', () => {
+            exec(`"${xmlProgramPath}" "${filePath}"`, (error) => {
+                if (error) {
+                    console.error(`Error opening XML file: ${error.message}`);
+                    new Notice(`Error opening XML file: ${error.message}`);
+                }
+            });
         });
+        modal.open();
     }
 }
 
@@ -461,6 +504,31 @@ class DropdownModal extends Modal {
 
         // Append elements to contentEl
         contentEl.appendChild(containerEl);
+    }
+
+    onClose() {
+        const { contentEl } = this;
+        contentEl.empty();
+    }
+}
+
+// ConfirmModal class
+class ConfirmModal extends Modal {
+    constructor(app, promptText, callback) {
+        super(app);
+        this.promptText = promptText;
+        this.callback = callback;
+    }
+
+    onOpen() {
+        const { contentEl } = this;
+        contentEl.createEl('h2', { text: this.promptText });
+
+        const buttonEl = contentEl.createEl('button', { text: 'Öffnen' });
+        buttonEl.addEventListener('click', () => {
+            this.callback();
+            this.close();
+        });
     }
 
     onClose() {
