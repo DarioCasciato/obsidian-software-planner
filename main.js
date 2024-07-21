@@ -480,14 +480,22 @@ class DropdownModal extends Modal {
         // Handle enter key and button click
         inputEl.addEventListener('keydown', (event) => {
             if (event.key === 'Enter') {
-                this.callback(dropdownEl.value);
-                this.close();
+                const visibleOptions = Array.from(dropdownEl.options).filter(option => option.style.display !== 'none');
+                if (visibleOptions.length > 0) {
+                    this.callback(visibleOptions[0].value);
+                    this.close();
+                }
             }
         });
 
         const buttonEl = containerEl.createEl('button', { text: 'OK', cls: 'dropdown-button' });
         buttonEl.addEventListener('click', () => {
-            this.callback(dropdownEl.value);
+            const visibleOptions = Array.from(dropdownEl.options).filter(option => option.style.display !== 'none');
+            if (visibleOptions.length > 0) {
+                this.callback(visibleOptions[0].value);
+            } else {
+                this.callback(dropdownEl.value);
+            }
             this.close();
         });
 
@@ -500,6 +508,8 @@ class DropdownModal extends Modal {
         contentEl.empty();
     }
 }
+
+
 
 // ConfirmModal class
 class ConfirmModal extends Modal {
