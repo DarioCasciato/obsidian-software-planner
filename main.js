@@ -52,7 +52,7 @@ async function addTaskToSchedule(schedulePath, taskName) {
     const taskSection = '## Aufträge\n\n';
     const insertIndex = scheduleContent.indexOf(taskSection) + taskSection.length;
     if (insertIndex === -1) {
-        throw new Error('Task section not found in schedule');
+        throw new Error('Aufgabenabschnitt nicht in Zeitplan gefunden');
     }
 
     scheduleContent = scheduleContent.slice(0, insertIndex) + taskEntry + scheduleContent.slice(insertIndex);
@@ -77,35 +77,26 @@ class SoftwarePlannerSettingTab extends PluginSettingTab {
         const { containerEl } = this;
         containerEl.empty();
 
-        containerEl.createEl('h2', { text: 'Software Planner Plugin Settings' });
+        containerEl.createEl('h2', { text: 'Software Planner Plugin Einstellungen' });
 
         // Software Settings
-        containerEl.createEl('h3', { text: 'Software Settings' });
+        containerEl.createEl('h3', { text: 'Software Einstellungen' });
 
-        this.addPathSetting(containerEl, 'Customer Template Path', 'customerTemplatePath');
-        this.addPathSetting(containerEl, 'Customer Destination Path', 'customerDestinationPath');
-        this.addPathSetting(containerEl, 'Deployment Template Path', 'deploymentTemplatePath');
+        this.addPathSetting(containerEl, 'Kunden Vorlagenpfad', 'customerTemplatePath');
+        this.addPathSetting(containerEl, 'Kundeneinsatz Vorlagenpfad', 'deploymentTemplatePath');
+        this.addPathSetting(containerEl, 'Kunden Zielverzeichnispfad', 'customerDestinationPath');
 
         // Remote Settings
         containerEl.createEl('h3', { text: 'Remote Settings' });
 
-        this.addPathSetting(containerEl, 'Remote Day Template Path', 'remoteDayTemplatePath');
-        this.addPathSetting(containerEl, 'Remote Day Destination Path', 'remoteDayDestinationPath');
-        this.addPathSetting(containerEl, 'Remote Task Template Path', 'remoteTaskTemplatePath');
+        this.addPathSetting(containerEl, 'Remote Tag Vorlagenpfad', 'remoteDayTemplatePath');
+        this.addPathSetting(containerEl, 'Remote Auftrag Vorlagenfpad', 'remoteTaskTemplatePath');
+        this.addPathSetting(containerEl, 'Remote Tag Zielverzeichnis Pfad', 'remoteDayDestinationPath');
 
         // XML Program Path
-        containerEl.createEl('h3', { text: 'XML Program Settings' });
+        containerEl.createEl('h3', { text: 'XMLVisualizer Einstellungen' });
 
-        this.addPathSetting(containerEl, 'XML Program Path', 'xmlProgramPath');
-
-        // Add a button to print the paths to the developer console
-        new Setting(containerEl)
-            .addButton(button => button
-                .setButtonText('Print Paths')
-                .setCta()
-                .onClick(() => {
-                    this.printPaths();
-                }));
+        this.addPathSetting(containerEl, 'XMLVisualizer Pfad', 'xmlProgramPath');
     }
 
     addPathSetting(containerEl, name, settingKey) {
@@ -113,18 +104,18 @@ class SoftwarePlannerSettingTab extends PluginSettingTab {
             .setName(name)
             .setDesc(`Path to the ${name.toLowerCase()}`)
             .addText(text => text
-                .setPlaceholder('Enter the path')
+                .setPlaceholder('Pfad angeben')
                 .setValue(this.plugin.settings[settingKey] || '')
                 .onChange(async (value) => {
                     this.plugin.settings[settingKey] = value;
                     await this.plugin.saveSettings();
                 }))
             .addButton(button => button
-                .setButtonText('Browse')
+                .setButtonText('Durchsuchen')
                 .setCta()
                 .onClick(async () => {
                     const result = await remote.dialog.showOpenDialog({
-                        properties: ['openFile']
+                        properties: ['openDirectory']
                     });
                     if (!result.canceled) {
                         const selectedPath = result.filePaths[0];
@@ -137,34 +128,12 @@ class SoftwarePlannerSettingTab extends PluginSettingTab {
                     }
                 }));
     }
-
-    printPaths() {
-        const vaultPath = this.app.vault.adapter.basePath;
-
-        const customerTemplatePath = path.join(vaultPath, this.plugin.settings.customerTemplatePath);
-        const customerDestinationPath = path.join(vaultPath, this.plugin.settings.customerDestinationPath);
-        const remoteDayTemplatePath = path.join(vaultPath, this.plugin.settings.remoteDayTemplatePath);
-        const remoteDayDestinationPath = path.join(vaultPath, this.plugin.settings.remoteDayDestinationPath);
-        const deploymentTemplatePath = path.join(vaultPath, this.plugin.settings.deploymentTemplatePath);
-        const remoteTaskTemplatePath = path.join(vaultPath, this.plugin.settings.remoteTaskTemplatePath);
-        const xmlProgramPath = path.join(vaultPath, this.plugin.settings.xmlProgramPath);
-
-        console.log('Customer Template Path:', customerTemplatePath);
-        console.log('Customer Destination Path:', customerDestinationPath);
-        console.log('Remote Day Template Path:', remoteDayTemplatePath);
-        console.log('Remote Day Destination Path:', remoteDayDestinationPath);
-        console.log('Deployment Template Path:', deploymentTemplatePath);
-        console.log('Remote Task Template Path:', remoteTaskTemplatePath);
-        console.log('XML Program Path:', xmlProgramPath);
-
-        new Notice('Paths printed to console');
-    }
 }
 
 // Main plugin class
 class SoftwarePlanner extends Plugin {
     async onload() {
-        console.log('Loading Software Planner plugin');
+        console.log('Software Planner Plugin wird geladen');
 
         // Load settings
         await this.loadSettings();
@@ -180,7 +149,7 @@ class SoftwarePlanner extends Plugin {
     }
 
     onunload() {
-        console.log('Unloading Software Planner plugin');
+        console.log('Software Planner Plugin wird entladen');
     }
 
     async loadSettings() {
@@ -218,7 +187,12 @@ class SoftwarePlanner extends Plugin {
     }
 
     async createNewCustomer() {
-        const customerName = await this.promptUser('Enter customer name');
+        if (!this.settings.customerTemplatePath || !this.settings.customerDestinationPath) {
+            new Notice('Setze die Kunden Vorlage- und Zielpfäde in den Einstellungen.');
+            return;
+        }
+
+        const customerName = await this.promptUser('Kundennamen eingeben');
         if (!customerName) return;
 
         const customerPath = path.join(this.app.vault.adapter.basePath, this.settings.customerDestinationPath, customerName);
@@ -226,14 +200,19 @@ class SoftwarePlanner extends Plugin {
 
         try {
             await copyFolder(templatePath, customerPath);
-            new Notice(`Customer folder created: ${customerName}`);
+            new Notice(`Kundenordner erstellt: ${customerName}`);
         } catch (error) {
-            console.error(`Error creating customer folder: ${error.message}`);
-            new Notice(`Error creating customer folder: ${error.message}`);
+            console.error(`Fehler beim erstellen vom Kundenordner: ${error.message}`);
+            new Notice(`Fehler beim erstellen vom Kundenordner: ${error.message}`);
         }
     }
 
     async createNewRemoteDay() {
+        if (!this.settings.remoteDayTemplatePath || !this.settings.remoteDayDestinationPath) {
+            new Notice('Setze die Remote-Tag Vorlage- und Zielpfäde in den Einstellungen.');
+            return;
+        }
+
         const remoteDay = await this.promptDate('Enter remote day (YYYY-MM-DD)');
         if (!remoteDay) return;
 
@@ -250,11 +229,16 @@ class SoftwarePlanner extends Plugin {
     }
 
     async createNewDeployment() {
+        if (!this.settings.deploymentTemplatePath || !this.settings.customerDestinationPath) {
+            new Notice('Setze die Einsatzvorlage und den Kundenzielpfad in den Einstellungen.');
+            return;
+        }
+
         const customers = getExistingFolders(path.join(this.app.vault.adapter.basePath, this.settings.customerDestinationPath));
-        const customerName = await this.promptDropdown('Select customer', customers);
+        const customerName = await this.promptDropdown('Kunden wählen', customers);
         if (!customerName) return;
 
-        const deploymentDate = await this.promptDate('Enter deployment date (YYYY-MM-DD)');
+        const deploymentDate = await this.promptDate('Einsatzdatum angeben (YYYY-MM-DD)');
         if (!deploymentDate) return;
 
         const customerPath = path.join(this.app.vault.adapter.basePath, this.settings.customerDestinationPath, customerName, '1. Einsätze', deploymentDate);
@@ -262,19 +246,24 @@ class SoftwarePlanner extends Plugin {
 
         try {
             await copyFolder(templatePath, customerPath);
-            new Notice(`Deployment folder created for ${customerName} on ${deploymentDate}`);
+            new Notice(`Einsatz erstellt für ${customerName} am ${deploymentDate}`);
         } catch (error) {
-            console.error(`Error creating deployment folder: ${error.message}`);
-            new Notice(`Error creating deployment folder: ${error.message}`);
+            console.error(`Fehler beim erstellen des Einsatzes: ${error.message}`);
+            new Notice(`Fehler beim erstellen des Einsatzes: ${error.message}`);
         }
     }
 
     async createNewRemoteTask() {
+        if (!this.settings.remoteTaskTemplatePath || !this.settings.remoteDayDestinationPath) {
+            new Notice('Setze die Remote-Auftrag Vorlage und den Remote-Tag Zielpfad in den Einstellungen.');
+            return;
+        }
+
         const remoteDays = getExistingFolders(path.join(this.app.vault.adapter.basePath, this.settings.remoteDayDestinationPath));
-        const remoteDay = await this.promptDropdown('Select remote day', remoteDays, true, (date) => remoteDays.includes(date));
+        const remoteDay = await this.promptDropdown('Wähle Remote-Tag', remoteDays, true, (date) => remoteDays.includes(date));
         if (!remoteDay) return;
 
-        const taskName = await this.promptUser('Enter task name');
+        const taskName = await this.promptUser('Auftragsnamen eingeben');
         if (!taskName) return;
 
         const remoteTaskPath = path.join(this.app.vault.adapter.basePath, this.settings.remoteDayDestinationPath, remoteDay, taskName);
@@ -287,10 +276,10 @@ class SoftwarePlanner extends Plugin {
             await copyFolder(templatePath, remoteTaskPath);
             await addTaskToSchedule(schedulePath, taskName);
             await createUpdatedTaskFile(taskFileTemplatePath, taskFilePath, taskName);
-            new Notice(`Remote task folder created for ${taskName} on ${remoteDay}`);
+            new Notice(`Remote Auftragsordner erstellt für ${taskName} am ${remoteDay}`);
         } catch (error) {
-            console.error(`Error creating remote task folder: ${error.message}`);
-            new Notice(`Error creating remote task folder: ${error.message}`);
+            console.error(`Fehler beim erstellen des Remote Auftrags: ${error.message}`);
+            new Notice(`Fehler beim erstellen des Remote Auftrags: ${error.message}`);
         }
     }
 
@@ -332,7 +321,7 @@ class SoftwarePlanner extends Plugin {
     showXMLConfirmDialog(file) {
         const xmlProgramPath = this.settings.xmlProgramPath;
         if (!xmlProgramPath) {
-            new Notice('No program set for opening XML files. Please set the XML Program Path in the plugin settings.');
+            new Notice('Kein XMLVisualizer Programm hinterlegt. Überprüfe die Einstellugnen.');
             return;
         }
 
@@ -340,8 +329,8 @@ class SoftwarePlanner extends Plugin {
         const modal = new ConfirmModal(this.app, 'XML öffnen im XML Visualizer', () => {
             exec(`"${xmlProgramPath}" "${filePath}"`, (error) => {
                 if (error) {
-                    console.error(`Error opening XML file: ${error.message}`);
-                    new Notice(`Error opening XML file: ${error.message}`);
+                    console.error(`Fehler beim öffnen des XML File: ${error.message}`);
+                    new Notice(`Fehler beim öffnen des XML File: ${error.message}`);
                 }
             });
         });
