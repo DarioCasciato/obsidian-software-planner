@@ -114,8 +114,9 @@ class SoftwarePlannerSettingTab extends PluginSettingTab {
                 .setButtonText('Durchsuchen')
                 .setCta()
                 .onClick(async () => {
+                    const properties = name === 'XMLVisualizer Pfad' ? ['openFile'] : ['openDirectory'];
                     const result = await remote.dialog.showOpenDialog({
-                        properties: ['openDirectory']
+                        properties: properties
                     });
                     if (!result.canceled) {
                         const selectedPath = result.filePaths[0];
