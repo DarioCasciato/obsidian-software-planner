@@ -145,6 +145,9 @@ class SoftwarePlanner extends Plugin {
         // Register commands
         this.registerCommands();
 
+        // Create ribbon icons
+        this.createRibbonIcons();
+
         // Add XML file extension support
         this.addXMLFileExtension();
     }
@@ -187,6 +190,13 @@ class SoftwarePlanner extends Plugin {
         });
     }
 
+    createRibbonIcons() {
+        this.addRibbonIcon('user-plus', 'Neuer Kunde', () => this.createNewCustomer());
+        this.addRibbonIcon('log-out', 'Neuer Einsatz', () => this.createNewDeployment());
+        this.addRibbonIcon('calendar-plus', 'Neuer Remote-Tag', () => this.createNewRemoteDay());
+        this.addRibbonIcon('clipboard-check', 'Neuer Remote-Auftrag', () => this.createNewRemoteTask());
+    }
+
     async createNewCustomer() {
         if (!this.settings.customerTemplatePath || !this.settings.customerDestinationPath) {
             new Notice('Setze die Kunden Vorlage- und Zielpfäde in den Einstellungen.');
@@ -214,7 +224,7 @@ class SoftwarePlanner extends Plugin {
             return;
         }
 
-        const remoteDay = await this.promptDate('Enter remote day (YYYY-MM-DD)');
+        const remoteDay = await this.promptDate('Remote-Tag Datum eingeben (YYYY-MM-DD)');
         if (!remoteDay) return;
 
         const remoteDayPath = path.join(this.app.vault.adapter.basePath, this.settings.remoteDayDestinationPath, remoteDay);
