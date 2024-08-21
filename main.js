@@ -188,6 +188,12 @@ class SoftwarePlanner extends Plugin {
             name: 'Neuen Remote-Auftrag erstellen',
             callback: () => this.createNewRemoteTask()
         });
+
+        this.addCommand({
+            id: 'check-remote-tasks',
+            name: 'Check Remote auf nicht abgeschlossene Aufträge',
+            callback: () => this.checkRemoteTasks()
+        });
     }
 
     createRibbonIcons() {
@@ -195,6 +201,7 @@ class SoftwarePlanner extends Plugin {
         this.addRibbonIcon('log-out', 'Neuer Einsatz', () => this.createNewDeployment());
         this.addRibbonIcon('calendar-plus', 'Neuer Remote-Tag', () => this.createNewRemoteDay());
         this.addRibbonIcon('clipboard-check', 'Neuer Remote-Auftrag', () => this.createNewRemoteTask());
+        this.addRibbonIcon('check', 'Check Remote Aufträge', () => this.checkRemoteTasks());
     }
 
     async createNewCustomer() {
@@ -292,6 +299,59 @@ class SoftwarePlanner extends Plugin {
             console.error(`Fehler beim erstellen des Remote Auftrags: ${error.message}`);
             new Notice(`Fehler beim erstellen des Remote Auftrags: ${error.message}`);
         }
+    }
+
+    async checkRemoteTasks() {
+        const basePath = path.join(this.app.vault.adapter.basePath, this.settings.remoteDayDestinationPath);
+        const remoteDays = getExistingFolders(basePath);
+        let reportContent = '\n';
+
+        for (let remoteDay of remoteDays) {
+            const schedulePath = path.join(basePath, remoteDay, 'Zeitplan.md');
+            if (fs.existsSync(schedulePath)) {
+                const scheduleContent = await fs.promises.readFile(schedulePath, 'utf8');
+
+                const tasksInProgress = this.extractInProgressTasks(scheduleContent);
+                if (tasksInProgress.length > 0) {
+                    // Erstelle einen Link zum Zeitplan des entsprechenden Remote-Tages
+                    reportContent += `## [[${remoteDay}/Zeitplan|${remoteDay}]]\n\n`;
+                    tasksInProgress.forEach(task => {
+                        // Füge die Aufgabe direkt in die Liste ein, ohne doppelten Bindestrich
+                        reportContent += `${task}\n`;
+                    });
+                    reportContent += '\n';
+                }
+            }
+        }
+
+        const reportFilePath = path.join(basePath, 'Nicht abgeschlossene Aufträge.md');
+        // Berichterstellung und Überschreiben der Datei, wenn sie existiert
+        await fs.promises.writeFile(reportFilePath, reportContent, 'utf8');
+        new Notice('Überprüfung abgeschlossen. Bericht erstellt.');
+    }
+
+    extractInProgressTasks(scheduleContent) {
+        const ignoredSections = ['Done', 'Abgebrochen'];
+        let inProgressTasks = [];
+
+        const sections = scheduleContent.split('##');
+
+        sections.forEach(section => {
+            let sectionHeader = section.split('\n')[0].trim();
+
+            // Prüfen, ob der Abschnitt ignoriert werden soll
+            if (!ignoredSections.some(ignored => sectionHeader.includes(ignored))) {
+                const lines = section.split('\n');
+                for (let line of lines) {
+                    if (line.includes('- [ ]')) {
+                        // Nur die Zeile mit der Aufgabe hinzufügen
+                        inProgressTasks.push(line.trim());
+                    }
+                }
+            }
+        });
+
+        return inProgressTasks;
     }
 
     async promptUser(promptText) {
