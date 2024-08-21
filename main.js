@@ -537,37 +537,55 @@ class DropdownModal extends Modal {
         this.options.forEach(option => {
             const optionEl = dropdownEl.createEl('option', { text: option });
             optionEl.value = option;
+
+            // Add double-click event listener
+            optionEl.addEventListener('dblclick', () => {
+                this.callback(optionEl.value);
+                this.close();
+            });
         });
 
         // Filter options based on input
         inputEl.addEventListener('input', () => {
             const filter = inputEl.value.toLowerCase();
+            let firstVisibleOption = null;
             for (let i = 0; i < dropdownEl.options.length; i++) {
                 const option = dropdownEl.options[i];
-                option.style.display = option.text.toLowerCase().includes(filter) ? '' : 'none';
-            }
-        });
-
-        // Handle enter key and button click
-        inputEl.addEventListener('keydown', (event) => {
-            if (event.key === 'Enter') {
-                const visibleOptions = Array.from(dropdownEl.options).filter(option => option.style.display !== 'none');
-                if (visibleOptions.length > 0) {
-                    this.callback(visibleOptions[0].value);
-                    this.close();
+                if (option.text.toLowerCase().includes(filter)) {
+                    option.style.display = '';
+                    if (!firstVisibleOption) firstVisibleOption = option;
+                } else {
+                    option.style.display = 'none';
                 }
             }
+            if (firstVisibleOption) {
+                dropdownEl.value = firstVisibleOption.value;
+            }
         });
 
-        const buttonEl = containerEl.createEl('button', { text: 'OK', cls: 'dropdown-button' });
-        buttonEl.addEventListener('click', () => {
-            const visibleOptions = Array.from(dropdownEl.options).filter(option => option.style.display !== 'none');
-            if (visibleOptions.length > 0) {
-                this.callback(visibleOptions[0].value);
-            } else {
+        // Handle keydown events for better navigation
+        dropdownEl.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter') {
+                event.preventDefault(); // Prevent form submission
                 this.callback(dropdownEl.value);
+                this.close();
+            } else if (event.key === 'Tab') {
+                event.preventDefault(); // Prevent tabbing out of the modal
+                inputEl.focus(); // Bring focus back to the input
             }
-            this.close();
+        });
+
+        inputEl.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter') {
+                event.preventDefault(); // Prevent form submission
+                if (dropdownEl.options.length > 0) {
+                    this.callback(dropdownEl.value);
+                    this.close();
+                }
+            } else if (event.key === 'ArrowDown') {
+                event.preventDefault();
+                dropdownEl.focus();
+            }
         });
 
         // Append elements to contentEl
@@ -579,6 +597,7 @@ class DropdownModal extends Modal {
         contentEl.empty();
     }
 }
+
 
 
 
