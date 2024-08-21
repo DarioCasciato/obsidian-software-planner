@@ -194,6 +194,12 @@ class SoftwarePlanner extends Plugin {
             name: 'Check Remote auf nicht abgeschlossene Aufträge',
             callback: () => this.checkRemoteTasks()
         });
+
+        this.addCommand({
+            id: 'archive-remote-days',
+            name: 'Remote-Tage Archivieren',
+            callback: () => this.archiveOldRemoteDays()
+        });
     }
 
     createRibbonIcons() {
@@ -202,6 +208,7 @@ class SoftwarePlanner extends Plugin {
         this.addRibbonIcon('calendar-plus', 'Neuer Remote-Tag', () => this.createNewRemoteDay());
         this.addRibbonIcon('clipboard-check', 'Neuer Remote-Auftrag', () => this.createNewRemoteTask());
         this.addRibbonIcon('check', 'Check Remote Aufträge', () => this.checkRemoteTasks());
+        this.addRibbonIcon('archive', 'Alte Remote-Tage archivieren', () => this.archiveOldRemoteDays());
     }
 
     async createNewCustomer() {
@@ -301,22 +308,56 @@ class SoftwarePlanner extends Plugin {
         }
     }
 
-    async checkRemoteTasks() {
+    async archiveOldRemoteDays() {
         const basePath = path.join(this.app.vault.adapter.basePath, this.settings.remoteDayDestinationPath);
+        const archivePath = path.join(basePath, '_Archiv');
+
+        // Archiv-Ordner erstellen, falls er nicht existiert
+        if (!fs.existsSync(archivePath)) {
+            fs.mkdirSync(archivePath);
+        }
+
         const remoteDays = getExistingFolders(basePath);
-        let reportContent = '\n';
+        const oneWeekAgo = new Date();
+        oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
 
         for (let remoteDay of remoteDays) {
-            const schedulePath = path.join(basePath, remoteDay, 'Zeitplan.md');
+            const remoteDayDate = new Date(remoteDay);
+            if (!isNaN(remoteDayDate) && remoteDayDate < oneWeekAgo) {
+                const sourcePath = path.join(basePath, remoteDay);
+                const destinationPath = path.join(archivePath, remoteDay);
+
+                fs.renameSync(sourcePath, destinationPath);
+                console.log(`Remote-Tag ${remoteDay} wurde ins Archiv verschoben.`);
+            }
+        }
+
+        new Notice('Archivierung abgeschlossen.');
+    }
+
+    async checkRemoteTasks() {
+        const basePath = path.join(this.app.vault.adapter.basePath, this.settings.remoteDayDestinationPath);
+        const archivePath = path.join(basePath, '_Archiv');
+        let reportContent = '\n';
+
+        // Alle Remote-Tage im Hauptordner und im Archiv-Ordner durchsuchen
+        const remoteDays = getExistingFolders(basePath).concat(getExistingFolders(archivePath));
+
+        for (let remoteDay of remoteDays) {
+            // Pfad zum Zeitplan des Remote-Tages erstellen
+            const schedulePathMain = path.join(basePath, remoteDay, 'Zeitplan.md');
+            const schedulePathArchive = path.join(archivePath, remoteDay, 'Zeitplan.md');
+            const schedulePath = fs.existsSync(schedulePathMain) ? schedulePathMain : schedulePathArchive;
+
             if (fs.existsSync(schedulePath)) {
                 const scheduleContent = await fs.promises.readFile(schedulePath, 'utf8');
 
                 const tasksInProgress = this.extractInProgressTasks(scheduleContent);
                 if (tasksInProgress.length > 0) {
                     // Erstelle einen Link zum Zeitplan des entsprechenden Remote-Tages
-                    reportContent += `## [[${remoteDay}/Zeitplan|${remoteDay}]]\n\n`;
+                    const linkPrefix = schedulePath.includes('_Archiv') ? `_Archiv/${remoteDay}` : remoteDay;
+                    reportContent += `## [[${linkPrefix}/Zeitplan|${remoteDay}]]\n\n`;
                     tasksInProgress.forEach(task => {
-                        // Füge die Aufgabe direkt in die Liste ein, ohne doppelten Bindestrich
                         reportContent += `${task}\n`;
                     });
                     reportContent += '\n';
@@ -344,7 +385,6 @@ class SoftwarePlanner extends Plugin {
                 const lines = section.split('\n');
                 for (let line of lines) {
                     if (line.includes('- [ ]')) {
-                        // Nur die Zeile mit der Aufgabe hinzufügen
                         inProgressTasks.push(line.trim());
                     }
                 }
