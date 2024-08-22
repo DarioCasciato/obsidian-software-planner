@@ -432,16 +432,24 @@ class SoftwarePlanner extends Plugin {
     showXMLConfirmDialog(file) {
         const xmlProgramPath = this.settings.xmlProgramPath;
         if (!xmlProgramPath) {
-            new Notice('Kein XMLVisualizer Programm hinterlegt. Überprüfe die Einstellugnen.');
+            new Notice('Kein XMLVisualizer Programm hinterlegt. Überprüfe die Einstellungen.');
             return;
         }
 
         const filePath = path.join(this.app.vault.adapter.basePath, file.path);
+        const activeLeaf = this.app.workspace.activeLeaf;
+
         const modal = new ConfirmModal(this.app, 'XML öffnen im XML Visualizer', () => {
+            // Schließe das aktive Leaf sofort
+            if (activeLeaf && activeLeaf.view.file && activeLeaf.view.file.path === file.path) {
+                activeLeaf.detach(); // Das Leaf (Tab) sofort schließen
+            }
+
+            // Startet das externe Programm
             exec(`"${xmlProgramPath}" "${filePath}"`, (error) => {
                 if (error) {
-                    console.error(`Fehler beim öffnen des XML File: ${error.message}`);
-                    new Notice(`Fehler beim öffnen des XML File: ${error.message}`);
+                    console.error(`Fehler beim Öffnen des XML-Files: ${error.message}`);
+                    new Notice(`Fehler beim Öffnen des XML-Files: ${error.message}`);
                 }
             });
         });
