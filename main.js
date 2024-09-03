@@ -238,7 +238,7 @@ class SoftwarePlanner extends Plugin {
             return;
         }
 
-        const remoteDay = await this.promptDate('Remote-Tag Datum eingeben (YYYY-MM-DD)');
+        const remoteDay = await this.promptSingleDate('Remote-Tag Datum eingeben (YYYY-MM-DD)');
         if (!remoteDay) return;
 
         const remoteDayPath = path.join(this.app.vault.adapter.basePath, this.settings.remoteDayDestinationPath, remoteDay);
@@ -246,10 +246,10 @@ class SoftwarePlanner extends Plugin {
 
         try {
             await copyFolder(templatePath, remoteDayPath);
-            new Notice(`Remote day folder created: ${remoteDay}`);
+            new Notice(`Remote-Tag Ordner erstellt: ${remoteDay}`);
         } catch (error) {
-            console.error(`Error creating remote day folder: ${error.message}`);
-            new Notice(`Error creating remote day folder: ${error.message}`);
+            console.error(`Fehler beim Erstellen des Remote-Tag Ordners: ${error.message}`);
+            new Notice(`Fehler beim Erstellen des Remote-Tag Ordners: ${error.message}`);
         }
     }
 
@@ -263,18 +263,23 @@ class SoftwarePlanner extends Plugin {
         const customerName = await this.promptDropdown('Kunden wählen', customers);
         if (!customerName) return;
 
-        const deploymentDate = await this.promptDate('Einsatzdatum angeben (YYYY-MM-DD)');
-        if (!deploymentDate) return;
+        const deploymentDates = await this.promptDateRange('Startdatum des Einsatzes angeben (YYYY-MM-DD)');
+        if (!deploymentDates) return;
 
-        const customerPath = path.join(this.app.vault.adapter.basePath, this.settings.customerDestinationPath, customerName, '1. Einsätze', deploymentDate);
+        const folderName = deploymentDates.endDate
+            ? `${deploymentDates.startDate} - ${deploymentDates.endDate}`
+            : deploymentDates.startDate;
+
+        const customerPath = path.join(this.app.vault.adapter.basePath, this.settings.customerDestinationPath, customerName, '1. Einsätze', folderName);
         const templatePath = path.join(this.app.vault.adapter.basePath, this.settings.deploymentTemplatePath);
 
         try {
             await copyFolder(templatePath, customerPath);
-            new Notice(`Einsatz erstellt für ${customerName} am ${deploymentDate}`);
+            await this.updateEinsatzMd(path.join(customerPath, 'Einsatz.md'), customerName, deploymentDates.startDate);
+            new Notice(`Einsatz erstellt für ${customerName} vom ${folderName}`);
         } catch (error) {
-            console.error(`Fehler beim erstellen des Einsatzes: ${error.message}`);
-            new Notice(`Fehler beim erstellen des Einsatzes: ${error.message}`);
+            console.error(`Fehler beim Erstellen des Einsatzes: ${error.message}`);
+            new Notice(`Fehler beim Erstellen des Einsatzes: ${error.message}`);
         }
     }
 
@@ -394,6 +399,23 @@ class SoftwarePlanner extends Plugin {
         return inProgressTasks;
     }
 
+    async updateEinsatzMd(einsatzFilePath, customerName, deploymentDate) {
+        try {
+            let content = await fs.promises.readFile(einsatzFilePath, 'utf8');
+
+            // Kunde und Datum in den Einsatz.md-Inhalt einfügen
+            content = content.replace('**Kunde**:', `**Kunde**: ${customerName}`);
+            content = content.replace('**Datum**:', `**Datum**: ${deploymentDate}`);
+
+            await fs.promises.writeFile(einsatzFilePath, content, 'utf8');
+            console.log(`Einsatz.md erfolgreich aktualisiert: Kunde - ${customerName}, Datum - ${deploymentDate}`);
+        } catch (error) {
+            console.error(`Fehler beim Aktualisieren der Einsatz.md: ${error.message}`);
+            new Notice(`Fehler beim Aktualisieren der Einsatz.md: ${error.message}`);
+        }
+    }
+
+
     async promptUser(promptText) {
         return new Promise((resolve) => {
             const modal = new PromptModal(this.app, promptText, resolve);
@@ -401,9 +423,17 @@ class SoftwarePlanner extends Plugin {
         });
     }
 
-    async promptDate(promptText) {
+    async promptSingleDate(promptText) {
         return new Promise((resolve) => {
-            const modal = new DatePromptModal(this.app, promptText, resolve);
+            const modal = new SingleDatePromptModal(this.app, promptText, resolve);
+            modal.open();
+        });
+    }
+
+
+    async promptDateRange(promptText) {
+        return new Promise((resolve) => {
+            const modal = new DateRangePromptModal(this.app, promptText, resolve);
             modal.open();
         });
     }
@@ -492,8 +522,7 @@ class PromptModal extends Modal {
     }
 }
 
-// DatePromptModal class
-class DatePromptModal extends Modal {
+class DateRangePromptModal extends Modal {
     constructor(app, promptText, callback) {
         super(app);
         this.promptText = promptText;
@@ -504,7 +533,80 @@ class DatePromptModal extends Modal {
         const { contentEl } = this;
         contentEl.createEl('h2', { text: this.promptText });
 
-        // Create container for buttons and input
+        const containerEl = contentEl.createEl('div', { cls: 'date-container' });
+
+        const todayButtonEl = containerEl.createEl('button', { text: 'Heute', cls: 'date-button' });
+        todayButtonEl.addEventListener('click', () => {
+            const today = new Date().toISOString().split('T')[0];
+            startInputEl.value = today;
+            this.callback({ startDate: today });
+            this.close();
+        });
+
+        const startInputEl = containerEl.createEl('input', { type: 'date', cls: 'date-input' });
+        startInputEl.focus();
+
+        const multiDayContainer = containerEl.createEl('div', { cls: 'multi-day-container' });
+
+        const multiDayCheckboxEl = multiDayContainer.createEl('input', { type: 'checkbox', cls: 'multi-day-checkbox' });
+        multiDayCheckboxEl.id = 'multiDayCheckbox';
+        const multiDayLabelEl = multiDayContainer.createEl('label', { text: 'Mehrtägig', cls: 'multi-day-label' });
+        multiDayLabelEl.htmlFor = 'multiDayCheckbox';
+
+        const endInputEl = containerEl.createEl('input', { type: 'date', cls: 'date-input' });
+
+        // Hide end date by default
+        endInputEl.style.display = 'none';
+
+        multiDayCheckboxEl.addEventListener('change', () => {
+            if (multiDayCheckboxEl.checked) {
+                endInputEl.style.display = 'block';
+            } else {
+                endInputEl.style.display = 'none';
+            }
+        });
+
+        startInputEl.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter') {
+                const dateValue = startInputEl.value;
+                const endDate = multiDayCheckboxEl.checked ? endInputEl.value : null;
+                this.callback({ startDate: dateValue, endDate });
+                this.close();
+            }
+        });
+
+        const okButtonEl = containerEl.createEl('button', { text: 'OK', cls: 'date-button' });
+        okButtonEl.addEventListener('click', () => {
+            const dateValue = startInputEl.value;
+            const endDate = multiDayCheckboxEl.checked ? endInputEl.value : null;
+            this.callback({ startDate: dateValue, endDate });
+            this.close();
+        });
+
+        contentEl.appendChild(containerEl);
+    }
+
+    onClose() {
+        const { contentEl } = this;
+        contentEl.empty();
+    }
+}
+
+
+
+
+
+class SingleDatePromptModal extends Modal {
+    constructor(app, promptText, callback) {
+        super(app);
+        this.promptText = promptText;
+        this.callback = callback;
+    }
+
+    onOpen() {
+        const { contentEl } = this;
+        contentEl.createEl('h2', { text: this.promptText });
+
         const containerEl = contentEl.createEl('div', { cls: 'date-container' });
 
         const todayButtonEl = containerEl.createEl('button', { text: 'Heute', cls: 'date-button' });
@@ -533,7 +635,6 @@ class DatePromptModal extends Modal {
             this.close();
         });
 
-        // Append elements to contentEl
         contentEl.appendChild(containerEl);
     }
 
@@ -692,6 +793,17 @@ style.textContent = `
     text-align: center;
 }
 
+.multi-day-container {
+    display: flex;
+    align-items: center;
+    margin-bottom: 10px;
+    width: 100%;
+}
+
+.multi-day-checkbox {
+    margin-right: 5px;
+}
+
 .dropdown-container {
     display: flex;
     flex-direction: column;
@@ -711,13 +823,13 @@ style.textContent = `
     box-sizing: border-box;
     padding: 5px;
     margin-bottom: 10px;
-    min-height: 100px; /* Set a minimum height for the dropdown */
+    min-height: 100px;
 }
 
 .dropdown-button {
     align-self: center;
     padding: 5px 10px;
-    margin-bottom: 5px; /* Add margin to separate buttons */
+    margin-bottom: 5px;
 }
 `;
 document.head.appendChild(style);
