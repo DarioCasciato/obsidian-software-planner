@@ -1,4 +1,4 @@
-const { Plugin, PluginSettingTab, Setting, Notice, Modal } = require('obsidian');
+const { Plugin, PluginSettingTab, Setting, Notice, Modal, MarkdownRenderer } = require('obsidian');
 const { remote } = require('electron');
 const path = require('path');
 const fs = require('fs');
@@ -90,7 +90,7 @@ class SoftwarePlannerSettingTab extends PluginSettingTab {
         containerEl.createEl('h3', { text: 'Remote Settings' });
 
         this.addPathSetting(containerEl, 'Remote Tag Vorlagenpfad', 'remoteDayTemplatePath');
-        this.addPathSetting(containerEl, 'Remote Auftrag Vorlagenfpad', 'remoteTaskTemplatePath');
+        this.addPathSetting(containerEl, 'Remote Auftrag Vorlagenpfad', 'remoteTaskTemplatePath');
         this.addPathSetting(containerEl, 'Remote Tag Zielverzeichnis Pfad', 'remoteDayDestinationPath');
 
         // XML Program Path
@@ -102,7 +102,7 @@ class SoftwarePlannerSettingTab extends PluginSettingTab {
     addPathSetting(containerEl, name, settingKey) {
         new Setting(containerEl)
             .setName(name)
-            .setDesc(`Path to the ${name.toLowerCase()}`)
+            .setDesc(`Pfad zu ${name}`)
             .addText(text => text
                 .setPlaceholder('Pfad angeben')
                 .setValue(this.plugin.settings[settingKey] || '')
@@ -150,6 +150,19 @@ class SoftwarePlanner extends Plugin {
 
         // Add XML file extension support
         this.addXMLFileExtension();
+
+        // Kalender-Befehl registrieren
+        this.addCommand({
+            id: 'open-calendar',
+            name: 'Kalender öffnen',
+            callback: () => this.openCalendar()
+        });
+
+        // Kalender-Symbol zum Ribbon hinzufügen
+        this.addRibbonIcon('calendar', 'Kalender öffnen', () => this.openCalendar());
+
+        // Initialize calendarModalInstance
+        this.calendarModalInstance = null;
     }
 
     onunload() {
@@ -209,6 +222,7 @@ class SoftwarePlanner extends Plugin {
         this.addRibbonIcon('clipboard-check', 'Neuer Remote-Auftrag', () => this.createNewRemoteTask());
         this.addRibbonIcon('check', 'Check Remote Aufträge', () => this.checkRemoteTasks());
         this.addRibbonIcon('archive', 'Alte Remote-Tage archivieren', () => this.archiveOldRemoteDays());
+        this.addRibbonIcon('calendar', 'Kalender öffnen', () => this.openCalendar());
     }
 
     async createNewCustomer() {
@@ -227,8 +241,8 @@ class SoftwarePlanner extends Plugin {
             await copyFolder(templatePath, customerPath);
             new Notice(`Kundenordner erstellt: ${customerName}`);
         } catch (error) {
-            console.error(`Fehler beim erstellen vom Kundenordner: ${error.message}`);
-            new Notice(`Fehler beim erstellen vom Kundenordner: ${error.message}`);
+            console.error(`Fehler beim Erstellen vom Kundenordner: ${error.message}`);
+            new Notice(`Fehler beim Erstellen vom Kundenordner: ${error.message}`);
         }
     }
 
@@ -308,8 +322,8 @@ class SoftwarePlanner extends Plugin {
             await createUpdatedTaskFile(taskFileTemplatePath, taskFilePath, taskName);
             new Notice(`Remote Auftragsordner erstellt für ${taskName} am ${remoteDay}`);
         } catch (error) {
-            console.error(`Fehler beim erstellen des Remote Auftrags: ${error.message}`);
-            new Notice(`Fehler beim erstellen des Remote Auftrags: ${error.message}`);
+            console.error(`Fehler beim Erstellen des Remote Auftrags: ${error.message}`);
+            new Notice(`Fehler beim Erstellen des Remote Auftrags: ${error.message}`);
         }
     }
 
@@ -415,7 +429,6 @@ class SoftwarePlanner extends Plugin {
         }
     }
 
-
     async promptUser(promptText) {
         return new Promise((resolve) => {
             const modal = new PromptModal(this.app, promptText, resolve);
@@ -430,10 +443,9 @@ class SoftwarePlanner extends Plugin {
         });
     }
 
-
-    async promptDateRange(promptText) {
+    async promptDateRange(promptText, defaultStartDate = null, defaultMultiDay = false) {
         return new Promise((resolve) => {
-            const modal = new DateRangePromptModal(this.app, promptText, resolve);
+            const modal = new DateRangePromptModal(this.app, promptText, resolve, defaultStartDate, defaultMultiDay);
             modal.open();
         });
     }
@@ -441,6 +453,14 @@ class SoftwarePlanner extends Plugin {
     async promptDropdown(promptText, options, showTodayButton = false, validateTodayCallback = null) {
         return new Promise((resolve) => {
             const modal = new DropdownModal(this.app, promptText, options, resolve, showTodayButton, validateTodayCallback);
+            modal.open();
+        });
+    }
+
+    // Neue Hilfsmethode zum Anzeigen einer Bestätigungsaufforderung
+    async promptConfirm(promptText) {
+        return new Promise((resolve) => {
+            const modal = new ConfirmPromptModal(this.app, promptText, resolve);
             modal.open();
         });
     }
@@ -485,6 +505,131 @@ class SoftwarePlanner extends Plugin {
         });
         modal.open();
     }
+
+    // Methode zum Öffnen des Kalenders
+    openCalendar() {
+        this.calendarModalInstance = new CalendarModal(this.app, this);
+        this.calendarModalInstance.open();
+    }
+
+    // Methoden zum Abrufen der Einsatz- und Remote-Daten
+    getDeploymentDates() {
+        const deploymentBasePath = path.join(this.app.vault.adapter.basePath, this.settings.customerDestinationPath);
+        const customers = getExistingFolders(deploymentBasePath);
+
+        let deploymentDates = {};
+        for (const customer of customers) {
+            const deploymentsPath = path.join(deploymentBasePath, customer, '1. Einsätze');
+            const deployments = getExistingFolders(deploymentsPath);
+
+            for (const deploymentFolder of deployments) {
+                // Extract dates from folder name
+                const dates = deploymentFolder.split(' - ');
+                for (const dateStr of dates) {
+                    if (dateStr.match(/^\d{4}-\d{2}-\d{2}$/)) {
+                        if (!deploymentDates[dateStr]) {
+                            deploymentDates[dateStr] = [];
+                        }
+                        deploymentDates[dateStr].push({
+                            customerName: customer,
+                            folderName: deploymentFolder
+                        });
+                    }
+                }
+            }
+        }
+        return deploymentDates;
+    }
+
+    getRemoteDates() {
+        const remoteBasePath = path.join(this.app.vault.adapter.basePath, this.settings.remoteDayDestinationPath);
+        const remoteDays = getExistingFolders(remoteBasePath);
+
+        let remoteDates = {};
+        for (const day of remoteDays) {
+            if (day.match(/^\d{4}-\d{2}-\d{2}$/)) {
+                remoteDates[day] = true;
+            }
+        }
+        return remoteDates;
+    }
+
+    // Methoden zum Erstellen von Einsätzen oder Remote-Tagen mit vorgegebenem Datum
+    async createNewDeploymentWithDate(deploymentDate) {
+        if (!this.settings.deploymentTemplatePath || !this.settings.customerDestinationPath) {
+            new Notice('Setze die Einsatzvorlage und den Kundenzielpfad in den Einstellungen.');
+            return;
+        }
+
+        const customers = getExistingFolders(path.join(this.app.vault.adapter.basePath, this.settings.customerDestinationPath));
+        const customerName = await this.promptDropdown('Kunden wählen', customers);
+        if (!customerName) return;
+
+        const deploymentDates = await this.promptDateRange('Startdatum des Einsatzes angeben (YYYY-MM-DD)', deploymentDate, false);
+        if (!deploymentDates) return;
+
+        const folderName = deploymentDates.endDate
+            ? `${deploymentDates.startDate} - ${deploymentDates.endDate}`
+            : deploymentDates.startDate;
+
+        const customerPath = path.join(this.app.vault.adapter.basePath, this.settings.customerDestinationPath, customerName, '1. Einsätze', folderName);
+        const templatePath = path.join(this.app.vault.adapter.basePath, this.settings.deploymentTemplatePath);
+
+        try {
+            await copyFolder(templatePath, customerPath);
+            await this.updateEinsatzMd(path.join(customerPath, 'Einsatz.md'), customerName, deploymentDates.startDate);
+            new Notice(`Einsatz erstellt für ${customerName} vom ${folderName}`);
+        } catch (error) {
+            console.error(`Fehler beim Erstellen des Einsatzes: ${error.message}`);
+            new Notice(`Fehler beim Erstellen des Einsatzes: ${error.message}`);
+        }
+
+        if (this.calendarModalInstance) {
+            this.calendarModalInstance.refreshCalendar();
+        }
+    }
+
+    async createNewRemoteDayWithDate(remoteDay) {
+        if (!this.settings.remoteDayTemplatePath || !this.settings.remoteDayDestinationPath) {
+            new Notice('Setze die Remote-Tag Vorlage- und Zielpfäde in den Einstellungen.');
+            return;
+        }
+
+        const remoteDayPath = path.join(this.app.vault.adapter.basePath, this.settings.remoteDayDestinationPath, remoteDay);
+        const templatePath = path.join(this.app.vault.adapter.basePath, this.settings.remoteDayTemplatePath);
+
+        // Prüfen, ob der Remote-Tag bereits existiert
+        if (fs.existsSync(remoteDayPath)) {
+            new Notice(`Remote-Tag für ${remoteDay} existiert bereits.`);
+            return;
+        }
+
+        try {
+            await copyFolder(templatePath, remoteDayPath);
+            new Notice(`Remote-Tag Ordner erstellt: ${remoteDay}`);
+        } catch (error) {
+            console.error(`Fehler beim Erstellen des Remote-Tag Ordners: ${error.message}`);
+            new Notice(`Fehler beim Erstellen des Remote-Tag Ordners: ${error.message}`);
+        }
+
+        // Aktualisiere den Kalender, falls er geöffnet ist
+        if (this.calendarModalInstance) {
+            this.calendarModalInstance.refreshCalendar();
+        }
+    }
+
+    // Methode zum Öffnen des CreateActionModals
+    openCreateModal(dateStr) {
+        const modal = new ChooseActionModal(this.app, dateStr, this);
+        modal.open();
+    }
+
+    // Methode zum Abrufen der Einsatzinformationen (aktualisiert)
+    // Jetzt nicht mehr benötigt, da wir die Informationen direkt aus getDeploymentDates() holen
+    // getDeploymentInfoByDate(dateStr) {
+    //     // Methode kann entfernt werden
+    // }
+
 }
 
 // PromptModal class
@@ -521,80 +666,6 @@ class PromptModal extends Modal {
         contentEl.empty();
     }
 }
-
-class DateRangePromptModal extends Modal {
-    constructor(app, promptText, callback) {
-        super(app);
-        this.promptText = promptText;
-        this.callback = callback;
-    }
-
-    onOpen() {
-        const { contentEl } = this;
-        contentEl.createEl('h2', { text: this.promptText });
-
-        const containerEl = contentEl.createEl('div', { cls: 'date-container' });
-
-        const todayButtonEl = containerEl.createEl('button', { text: 'Heute', cls: 'date-button' });
-        todayButtonEl.addEventListener('click', () => {
-            const today = new Date().toISOString().split('T')[0];
-            startInputEl.value = today;
-            this.callback({ startDate: today });
-            this.close();
-        });
-
-        const startInputEl = containerEl.createEl('input', { type: 'date', cls: 'date-input' });
-        startInputEl.focus();
-
-        const multiDayContainer = containerEl.createEl('div', { cls: 'multi-day-container' });
-
-        const multiDayCheckboxEl = multiDayContainer.createEl('input', { type: 'checkbox', cls: 'multi-day-checkbox' });
-        multiDayCheckboxEl.id = 'multiDayCheckbox';
-        const multiDayLabelEl = multiDayContainer.createEl('label', { text: 'Mehrtägig', cls: 'multi-day-label' });
-        multiDayLabelEl.htmlFor = 'multiDayCheckbox';
-
-        const endInputEl = containerEl.createEl('input', { type: 'date', cls: 'date-input' });
-
-        // Hide end date by default
-        endInputEl.style.display = 'none';
-
-        multiDayCheckboxEl.addEventListener('change', () => {
-            if (multiDayCheckboxEl.checked) {
-                endInputEl.style.display = 'block';
-            } else {
-                endInputEl.style.display = 'none';
-            }
-        });
-
-        startInputEl.addEventListener('keydown', (event) => {
-            if (event.key === 'Enter') {
-                const dateValue = startInputEl.value;
-                const endDate = multiDayCheckboxEl.checked ? endInputEl.value : null;
-                this.callback({ startDate: dateValue, endDate });
-                this.close();
-            }
-        });
-
-        const okButtonEl = containerEl.createEl('button', { text: 'OK', cls: 'date-button' });
-        okButtonEl.addEventListener('click', () => {
-            const dateValue = startInputEl.value;
-            const endDate = multiDayCheckboxEl.checked ? endInputEl.value : null;
-            this.callback({ startDate: dateValue, endDate });
-            this.close();
-        });
-
-        contentEl.appendChild(containerEl);
-    }
-
-    onClose() {
-        const { contentEl } = this;
-        contentEl.empty();
-    }
-}
-
-
-
-
 
 class SingleDatePromptModal extends Modal {
     constructor(app, promptText, callback) {
@@ -634,6 +705,93 @@ class SingleDatePromptModal extends Modal {
             this.callback(dateValue);
             this.close();
         });
+
+        contentEl.appendChild(containerEl);
+    }
+
+    onClose() {
+        const { contentEl } = this;
+        contentEl.empty();
+    }
+}
+
+class DateRangePromptModal extends Modal {
+    constructor(app, promptText, callback, defaultStartDate = null, defaultMultiDay = false) {
+        super(app);
+        this.promptText = promptText;
+        this.callback = callback;
+        this.defaultStartDate = defaultStartDate;
+        this.defaultMultiDay = defaultMultiDay;
+    }
+
+    onOpen() {
+        const { contentEl } = this;
+        contentEl.createEl('h2', { text: this.promptText });
+
+        const containerEl = contentEl.createEl('div', { cls: 'date-container' });
+
+        const startInputEl = containerEl.createEl('input', { type: 'date', cls: 'date-input' });
+        startInputEl.focus();
+
+        // Setze das vorbefüllte Startdatum, falls vorhanden
+        if (this.defaultStartDate) {
+            startInputEl.value = this.defaultStartDate;
+        }
+
+        const todayButtonEl = containerEl.createEl('button', { text: 'Heute', cls: 'date-button' });
+        todayButtonEl.addEventListener('click', () => {
+            const today = new Date().toISOString().split('T')[0];
+            startInputEl.value = today;
+            this.callback({ startDate: today });
+            this.close();
+        });
+
+        const multiDayContainer = containerEl.createEl('div', { cls: 'multi-day-container' });
+
+        const multiDayCheckboxEl = multiDayContainer.createEl('input', { type: 'checkbox', cls: 'multi-day-checkbox' });
+        multiDayCheckboxEl.id = 'multiDayCheckbox';
+
+        // Setze den Standardwert für die Mehrtägig-Checkbox
+        multiDayCheckboxEl.checked = this.defaultMultiDay;
+
+        const multiDayLabelEl = multiDayContainer.createEl('label', { text: 'Mehrtägig', cls: 'multi-day-label' });
+        multiDayLabelEl.htmlFor = 'multiDayCheckbox';
+
+        const endInputEl = containerEl.createEl('input', { type: 'date', cls: 'date-input' });
+
+        // Zeige das Enddatum-Feld nur an, wenn die Checkbox ausgewählt ist
+        endInputEl.style.display = this.defaultMultiDay ? 'block' : 'none';
+
+        multiDayCheckboxEl.addEventListener('change', () => {
+            if (multiDayCheckboxEl.checked) {
+                endInputEl.style.display = 'block';
+            } else {
+                endInputEl.style.display = 'none';
+            }
+        });
+
+        startInputEl.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter') {
+                const dateValue = startInputEl.value;
+                const endDate = multiDayCheckboxEl.checked ? endInputEl.value : null;
+                this.callback({ startDate: dateValue, endDate });
+                this.close();
+            }
+        });
+
+        const okButtonEl = containerEl.createEl('button', { text: 'OK', cls: 'date-button' });
+        okButtonEl.addEventListener('click', () => {
+            const dateValue = startInputEl.value;
+            const endDate = multiDayCheckboxEl.checked ? endInputEl.value : null;
+            this.callback({ startDate: dateValue, endDate });
+            this.close();
+        });
+
+        // Elemente zum Container hinzufügen
+        multiDayContainer.appendChild(multiDayLabelEl);
+        containerEl.appendChild(multiDayContainer);
+        containerEl.appendChild(endInputEl);
+        containerEl.appendChild(okButtonEl);
 
         contentEl.appendChild(containerEl);
     }
@@ -747,8 +905,38 @@ class DropdownModal extends Modal {
     }
 }
 
+// ConfirmPromptModal class
+class ConfirmPromptModal extends Modal {
+    constructor(app, promptText, callback) {
+        super(app);
+        this.promptText = promptText;
+        this.callback = callback;
+    }
 
+    onOpen() {
+        const { contentEl } = this;
+        contentEl.createEl('h2', { text: this.promptText });
 
+        const buttonContainer = contentEl.createEl('div', { cls: 'button-container' });
+
+        const yesButton = buttonContainer.createEl('button', { text: 'Ja' });
+        yesButton.addEventListener('click', () => {
+            this.callback(true);
+            this.close();
+        });
+
+        const noButton = buttonContainer.createEl('button', { text: 'Nein' });
+        noButton.addEventListener('click', () => {
+            this.callback(false);
+            this.close();
+        });
+    }
+
+    onClose() {
+        const { contentEl } = this;
+        contentEl.empty();
+    }
+}
 
 // ConfirmModal class
 class ConfirmModal extends Modal {
@@ -775,9 +963,269 @@ class ConfirmModal extends Modal {
     }
 }
 
-// CSS to ensure the buttons and input are stacked and have margin
+// Neue Klasse 'CalendarModal' hinzufügen
+class CalendarModal extends Modal {
+    constructor(app, plugin) {
+        super(app);
+        this.plugin = plugin;
+        this.currentDate = new Date(); // Startdatum ist das aktuelle Datum
+    }
+
+    onOpen() {
+        const { contentEl } = this;
+        contentEl.empty();
+
+        // Modal-Größe anpassen
+        this.modalEl.style.width = '80%'; // Setzt die Breite auf 80% des Viewports
+        this.modalEl.style.height = '80%'; // Setzt die Höhe auf 80% des Viewports
+
+        contentEl.style.width = '100%';
+        contentEl.style.height = '100%';
+        contentEl.style.display = 'flex';
+        contentEl.style.flexDirection = 'column';
+
+        // Fügt oben einen Abstand hinzu
+        contentEl.style.paddingTop = '20px';
+
+        // Navigations-Buttons erstellen
+        const navContainer = contentEl.createEl('div', { cls: 'calendar-nav' });
+
+        const prevButton = navContainer.createEl('button', { text: '← Vorherige 4 Monate' });
+        prevButton.addEventListener('click', () => {
+            this.currentDate.setMonth(this.currentDate.getMonth() - 4);
+            this.renderCalendar();
+        });
+
+        const nextButton = navContainer.createEl('button', { text: 'Nächste 4 Monate →' });
+        nextButton.addEventListener('click', () => {
+            this.currentDate.setMonth(this.currentDate.getMonth() + 4);
+            this.renderCalendar();
+        });
+
+        // Datumssuche erstellen
+        const searchContainer = contentEl.createEl('div', { cls: 'calendar-search' });
+        const searchInput = searchContainer.createEl('input', { type: 'date' });
+        const searchButton = searchContainer.createEl('button', { text: 'Springe zu Datum' });
+        searchButton.addEventListener('click', () => {
+            const selectedDate = new Date(searchInput.value);
+            if (!isNaN(selectedDate)) {
+                this.currentDate = selectedDate;
+                this.renderCalendar();
+            }
+        });
+
+        this.calendarContainer = contentEl.createEl('div', { cls: 'calendar-container' });
+
+        this.renderCalendar();
+    }
+
+    renderCalendar() {
+        const { calendarContainer } = this;
+        calendarContainer.empty();
+
+        // Einsätze und Remote-Tage abrufen
+        const deployments = this.plugin.getDeploymentDates();
+        const remoteDays = this.plugin.getRemoteDates();
+
+        const startMonth = new Date(Date.UTC(this.currentDate.getUTCFullYear(), this.currentDate.getUTCMonth(), 1));
+        for (let i = 0; i < 4; i++) {
+            const monthDate = new Date(Date.UTC(startMonth.getUTCFullYear(), startMonth.getUTCMonth() + i, 1));
+            const monthEl = calendarContainer.createEl('div', { cls: 'calendar-month' });
+            monthEl.createEl('h3', { text: monthDate.toLocaleString('default', { month: 'long', year: 'numeric' }) });
+
+            const daysEl = monthEl.createEl('div', { cls: 'calendar-days' });
+
+            // Tage des Monats generieren
+            const daysInMonth = new Date(Date.UTC(monthDate.getUTCFullYear(), monthDate.getUTCMonth() + 1, 0)).getUTCDate();
+            let firstDayOfWeek = new Date(Date.UTC(monthDate.getUTCFullYear(), monthDate.getUTCMonth(), 1)).getUTCDay();
+
+            // Anpassung für Wochenbeginn am Montag
+            firstDayOfWeek = (firstDayOfWeek + 6) % 7;
+
+            // Leere Felder für die Ausrichtung hinzufügen
+            for (let j = 0; j < firstDayOfWeek; j++) {
+                daysEl.createEl('div', { cls: 'calendar-day empty' });
+            }
+
+            for (let day = 1; day <= daysInMonth; day++) {
+                const date = new Date(Date.UTC(monthDate.getUTCFullYear(), monthDate.getUTCMonth(), day));
+                const dateStr = date.toISOString().split('T')[0];
+
+                const dayEl = daysEl.createEl('div', { cls: 'calendar-day' });
+
+                // Tageszahl anzeigen
+                dayEl.createEl('div', { text: day.toString(), cls: 'day-number' });
+
+                // Überprüfen, ob es heute ist
+                const today = new Date();
+                const isToday = date.getUTCFullYear() === today.getFullYear() &&
+                                date.getUTCMonth() === today.getMonth() &&
+                                date.getUTCDate() === today.getDate();
+
+                if (isToday) {
+                    dayEl.addClass('today');
+                }
+
+                // Prüfen, ob das Datum Termine hat
+                const dayDeployments = deployments[dateStr] || [];
+                const isRemoteDay = remoteDays[dateStr];
+
+                // Termine anzeigen
+                if (dayDeployments.length > 0 || isRemoteDay) {
+                    const eventsEl = dayEl.createEl('div', { cls: 'day-events' });
+
+                    if (isRemoteDay) {
+                        eventsEl.createEl('div', { text: 'Remote', cls: 'event remote-event' });
+                    }
+
+                    for (const deployment of dayDeployments) {
+                        eventsEl.createEl('div', {
+                            text: `${deployment.customerName}`,
+                            cls: 'event deployment-event'
+                        });
+                    }
+                }
+
+                dayEl.addEventListener('click', () => {
+                    if (dayDeployments.length > 0 || isRemoteDay) {
+                        // Wenn es bereits Termine gibt, zeige die Informationen an
+                        this.openDayInfoModal(dateStr);
+                    } else {
+                        // Ansonsten öffne das Modal zum Erstellen eines neuen Termins
+                        this.openCreateModal(dateStr);
+                    }
+                });
+            }
+        }
+    }
+
+    openCreateModal(dateStr) {
+        // Benutzer fragen, ob ein Einsatz oder ein Remote-Tag erstellt werden soll
+        const modal = new ChooseActionModal(this.app, dateStr, this.plugin);
+        modal.open();
+
+        // Nach Schließen des Modals den Kalender aktualisieren
+        modal.onClose = () => {
+            this.renderCalendar();
+        };
+    }
+
+    openDayInfoModal(dateStr) {
+        const modal = new DayInfoModal(this.app, dateStr, this.plugin);
+        modal.open();
+    }
+
+    refreshCalendar() {
+        this.renderCalendar();
+    }
+
+    onClose() {
+        const { contentEl } = this;
+        contentEl.empty();
+    }
+}
+
+// Modal zum Auswählen der Aktion beim Klicken auf einen Tag
+class ChooseActionModal extends Modal {
+    constructor(app, dateStr, plugin) {
+        super(app);
+        this.dateStr = dateStr;
+        this.plugin = plugin;
+    }
+
+    onOpen() {
+        const { contentEl } = this;
+        contentEl.empty();
+
+        contentEl.addClass('choose-action-modal'); // Neue Klasse hinzufügen
+
+        contentEl.createEl('h2', { text: 'Aktion wählen' });
+        contentEl.createEl('p', { text: `Datum: ${this.dateStr}` });
+
+        const buttonContainer = contentEl.createEl('div', { cls: 'button-container' });
+
+        const createDeploymentButton = buttonContainer.createEl('button', { text: 'Einsatz erstellen' });
+        createDeploymentButton.addEventListener('click', async () => {
+            await this.plugin.createNewDeploymentWithDate(this.dateStr);
+            this.close();
+        });
+
+        const createRemoteDayButton = buttonContainer.createEl('button', { text: 'Remote-Tag erstellen' });
+        createRemoteDayButton.addEventListener('click', async () => {
+            await this.plugin.createNewRemoteDayWithDate(this.dateStr);
+            this.close();
+        });
+    }
+
+    onClose() {
+        const { contentEl } = this;
+        contentEl.empty();
+    }
+}
+
+class DayInfoModal extends Modal {
+    constructor(app, dateStr, plugin) {
+        super(app);
+        this.dateStr = dateStr;
+        this.plugin = plugin;
+    }
+
+    async onOpen() {
+        const { contentEl } = this;
+        contentEl.empty();
+
+        contentEl.addClass('day-info-modal'); // Neue Klasse hinzufügen
+
+        contentEl.createEl('h2', { text: 'Termin-Informationen' });
+        contentEl.createEl('p', { text: `Datum: ${this.dateStr}` });
+        contentEl.createEl('p', { text: `` });
+
+        // Informationen sammeln
+        let infoText = '\n';
+
+        const deployments = this.plugin.getDeploymentDates()[this.dateStr] || [];
+        const isRemoteDay = this.plugin.getRemoteDates()[this.dateStr];
+
+        // Anzeige der Informationen
+        const infoEl = contentEl.createEl('div', { cls: 'info-text' });
+
+        if (isRemoteDay) {
+            infoText += `\n**Remote-Tag**\n\n`;
+        }
+
+        for (const deployment of deployments) {
+            infoText += `\n**Kunde**: ${deployment.customerName}\n`;
+            infoText += `**Einsatzdaten**: ${deployment.folderName}\n`;
+        }
+
+        MarkdownRenderer.renderMarkdown(infoText, infoEl, '', this);
+
+        // Buttons für Aktionen
+        const buttonContainer = contentEl.createEl('div', { cls: 'button-container' });
+
+        const closeButton = buttonContainer.createEl('button', { text: 'Schließen' });
+        closeButton.addEventListener('click', () => {
+            this.close();
+        });
+
+        const newEventButton = buttonContainer.createEl('button', { text: 'Neuen Termin erstellen' });
+        newEventButton.addEventListener('click', () => {
+            this.close();
+            this.plugin.openCreateModal(this.dateStr);
+        });
+    }
+
+    onClose() {
+        const { contentEl } = this;
+        contentEl.empty();
+    }
+}
+
+// CSS-Stile hinzufügen
 const style = document.createElement('style');
 style.textContent = `
+    /* CSS-Stile */
+
 .date-container {
     display: flex;
     flex-direction: column;
@@ -830,6 +1278,132 @@ style.textContent = `
     align-self: center;
     padding: 5px 10px;
     margin-bottom: 5px;
+}
+
+/* Kalender-Navigation */
+.calendar-nav {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 10px;
+    margin-top: 20px; /* Fügt oben einen Abstand hinzu */
+}
+
+/* Kalender-Suche */
+.calendar-search {
+    display: flex;
+    margin-bottom: 10px;
+}
+
+.calendar-search input {
+    margin-right: 5px;
+}
+
+/* Kalender-Container */
+.calendar-container {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr); /* 2 Spalten */
+    grid-gap: 20px; /* Abstand zwischen den Monaten */
+    width: 100%;
+    flex-grow: 1; /* Kalender füllt den verfügbaren Platz */
+    overflow-y: auto; /* Scrollen bei Bedarf */
+}
+
+/* Kalender-Monat */
+.calendar-month {
+    box-sizing: border-box;
+    padding: 10px;
+}
+
+/* Kalender-Tage */
+.calendar-days {
+    display: flex;
+    flex-wrap: wrap;
+}
+
+.calendar-day {
+    width: 14.28%; /* Jede Woche hat 7 Tage */
+    box-sizing: border-box;
+    padding: 10px;
+    text-align: center;
+    cursor: pointer;
+    border: 1px solid var(--background-modifier-border);
+    margin-bottom: -1px;
+}
+
+.calendar-day.empty {
+    visibility: hidden;
+}
+
+.calendar-day.today {
+    border: 2px solid blue;
+    border-radius: 5px;
+    box-sizing: border-box;
+}
+
+.calendar-day.today .day-number {
+    background-color: blue;
+    color: white;
+    border-radius: 50%;
+    width: 24px;
+    height: 24px;
+    line-height: 24px;
+    display: inline-block;
+}
+
+/* Kalender-Tageszahl */
+.day-number {
+    font-weight: bold;
+}
+
+/* Tagesereignisse */
+.day-events {
+    margin-top: 5px;
+}
+
+/* Einzelnes Ereignis */
+.event {
+    font-size: 10px;
+    margin-top: 2px;
+    padding: 2px;
+    border-radius: 3px;
+    color: white;
+}
+
+/* Stil für Einsatz-Ereignis */
+.deployment-event {
+    background-color: var(--interactive-accent);
+}
+
+/* Stil für Remote-Ereignis */
+.remote-event {
+    background-color: #C71585;
+}
+
+/* Modal-Buttons Abstand */
+.choose-action-modal .button-container,
+.day-info-modal .button-container {
+    display: flex;
+    justify-content: center;
+    margin-top: 20px;
+}
+
+.choose-action-modal .button-container button,
+.day-info-modal .button-container button {
+    margin: 0 10px; /* Abstand zwischen den Buttons */
+    flex: 1;
+    padding: 10px;
+}
+
+.day-info-modal .info-text {
+    white-space: pre-wrap; /* Zeilenumbrüche berücksichtigen */
+    margin-top: 10px;
+}
+
+/* Größe des Modals anpassen */
+.modal-container {
+    max-width: none; /* Entfernt die maximale Breite */
+    width: 100%;
+    height: 100%;
 }
 `;
 document.head.appendChild(style);
