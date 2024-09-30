@@ -1,4 +1,5 @@
-const { Plugin, PluginSettingTab, Setting, Notice, Modal, MarkdownRenderer } = require('obsidian');
+const { Plugin, PluginSettingTab, Setting, Notice, Modal, MarkdownRenderer, TFile } = require('obsidian');
+
 const { remote } = require('electron');
 const path = require('path');
 const fs = require('fs');
@@ -636,12 +637,100 @@ class SoftwarePlanner extends Plugin {
         modal.open();
     }
 
-    // Methode zum Abrufen der Einsatzinformationen (aktualisiert)
-    // Jetzt nicht mehr benötigt, da wir die Informationen direkt aus getDeploymentDates() holen
-    // getDeploymentInfoByDate(dateStr) {
-    //     // Methode kann entfernt werden
-    // }
+    async openDeploymentFile(deployment) {
+        // Basis-Pfad zum Vault
+        const baseVaultPath = this.app.vault.adapter.basePath;
 
+        // Pfad zum Einsatzordner korrekt konstruieren
+        const deploymentFolderPath = path.join(
+            baseVaultPath,
+            this.settings.customerDestinationPath,
+            deployment.customerName,
+            '1. Einsätze',
+            deployment.folderName
+        );
+
+        // Pfad zur Datei 'Einsatz.md' im Einsatzordner
+        const deploymentFilePath = path.join(deploymentFolderPath, 'Einsatz.md');
+
+        // Überprüfen, ob 'Einsatz.md' existiert
+        if (!fs.existsSync(deploymentFilePath)) {
+            new Notice('Einsatz.md existiert nicht.');
+            return;
+        }
+
+        // Pfad relativ zum Vault erhalten
+        const filePathInVault = path.relative(baseVaultPath, deploymentFilePath).replace(/\\/g, '/');
+
+        console.log('Deployment File Path:', deploymentFilePath);
+        console.log('File Path in Vault:', filePathInVault);
+
+        // Datei in Obsidian abrufen
+        const file = this.app.vault.getAbstractFileByPath(filePathInVault);
+
+        if (file && file instanceof TFile) {
+            // Datei in neuem Tab öffnen
+            await this.app.workspace.getLeaf().openFile(file);
+
+            // Kalenderansicht schließen
+            if (this.calendarModalInstance) {
+                this.calendarModalInstance.close();
+                this.calendarModalInstance = null; // Optional: Instanz auf null setzen
+            }
+        } else {
+            new Notice('Einsatz.md nicht gefunden.');
+        }
+    }
+
+
+    async openRemoteSchedule(dateStr) {
+        // Basis-Pfad zum Vault
+        const baseVaultPath = this.app.vault.adapter.basePath;
+
+        // Pfad zum Remote-Tag Basisordner
+        const remoteDayBasePath = path.join(baseVaultPath, this.settings.remoteDayDestinationPath);
+
+        // Pfad zum Remote-Tag Ordner
+        let remoteDayPath = path.join(remoteDayBasePath, dateStr);
+
+        // Pfad zur Datei 'Zeitplan.md' im Remote-Tag Ordner
+        let scheduleFilePath = path.join(remoteDayPath, 'Zeitplan.md');
+
+        // Überprüfen, ob 'Zeitplan.md' existiert
+        if (!fs.existsSync(scheduleFilePath)) {
+            // Wenn nicht, im '_Archiv'-Ordner nachsehen
+            remoteDayPath = path.join(remoteDayBasePath, '_Archiv', dateStr);
+            scheduleFilePath = path.join(remoteDayPath, 'Zeitplan.md');
+        }
+
+        // Endgültige Überprüfung, ob 'Zeitplan.md' existiert
+        if (!fs.existsSync(scheduleFilePath)) {
+            new Notice('Zeitplan.md existiert nicht.');
+            return;
+        }
+
+        // Pfad relativ zum Vault erhalten
+        const filePathInVault = path.relative(baseVaultPath, scheduleFilePath).replace(/\\/g, '/');
+
+        console.log('Schedule File Path:', scheduleFilePath);
+        console.log('File Path in Vault:', filePathInVault);
+
+        // Datei in Obsidian abrufen
+        const file = this.app.vault.getAbstractFileByPath(filePathInVault);
+
+        if (file && file instanceof TFile) {
+            // Datei in neuem Tab öffnen
+            await this.app.workspace.getLeaf().openFile(file);
+
+            // Kalenderansicht schließen
+            if (this.calendarModalInstance) {
+                this.calendarModalInstance.close();
+                this.calendarModalInstance = null; // Optional: Instanz auf null setzen
+            }
+        } else {
+            new Notice('Zeitplan.md nicht gefunden.');
+        }
+    }
 }
 
 // PromptModal class
@@ -1031,6 +1120,8 @@ class CalendarModal extends Modal {
         this.renderCalendar();
     }
 
+    // In der Klasse CalendarModal:
+
     renderCalendar() {
         const { calendarContainer } = this;
         calendarContainer.empty();
@@ -1066,7 +1157,7 @@ class CalendarModal extends Modal {
                 const dayEl = daysEl.createEl('div', { cls: 'calendar-day' });
 
                 // Tageszahl anzeigen
-                dayEl.createEl('div', { text: currentDate.getUTCDate().toString(), cls: 'day-number' });
+                const dayNumberEl = dayEl.createEl('div', { text: currentDate.getUTCDate().toString(), cls: 'day-number' });
 
                 // Überprüfen, ob es heute ist
                 const today = new Date();
@@ -1083,6 +1174,12 @@ class CalendarModal extends Modal {
                     dayEl.addClass('other-month');
                 }
 
+                // **Hier prüfen wir, ob der aktuelle Tag ein Samstag oder Sonntag ist**
+                const dayOfWeek = currentDate.getUTCDay(); // Sonntag = 0, Montag = 1, ..., Samstag = 6
+                if (dayOfWeek === 0 || dayOfWeek === 6) {
+                    dayNumberEl.addClass('weekend');
+                }
+
                 // Prüfen, ob das Datum Termine hat
                 const dayDeployments = deployments[dateStr] || [];
                 const isRemoteDay = remoteDays[dateStr];
@@ -1093,7 +1190,7 @@ class CalendarModal extends Modal {
 
                     if (isRemoteDay) {
                         const eventClass = isRemoteDay.archived ? 'remote-event archived' : 'remote-event';
-                        eventsEl.createEl('div', { text: 'Remote', cls: `event ${eventClass}` });
+                        eventsEl.createEl('div', { text: 'Remote-Tag', cls: `event ${eventClass}` });
                     }
 
                     for (const deployment of dayDeployments) {
@@ -1119,6 +1216,7 @@ class CalendarModal extends Modal {
             }
         }
     }
+
 
     openCreateModal(dateStr) {
         // Benutzer fragen, ob ein Einsatz oder ein Remote-Tag erstellt werden soll
@@ -1199,40 +1297,54 @@ class DayInfoModal extends Modal {
 
         contentEl.createEl('h2', { text: 'Termin-Informationen' });
         contentEl.createEl('p', { text: `Datum: ${this.dateStr}` });
-        contentEl.createEl('p', { text: `` });
 
         // Informationen sammeln
-        let infoText = '\n';
-
         const deployments = this.plugin.getDeploymentDates()[this.dateStr] || [];
         const isRemoteDay = this.plugin.getRemoteDates()[this.dateStr];
 
         // Anzeige der Informationen
         const infoEl = contentEl.createEl('div', { cls: 'info-text' });
 
-        if (isRemoteDay) {
-            infoText += `\n**Remote-Tag**\n\n`;
-        }
-
-        for (const deployment of deployments) {
-            infoText += `\n**Kunde**: ${deployment.customerName}\n`;
-            infoText += `**Einsatzdaten**: ${deployment.folderName}\n`;
-        }
-
-        MarkdownRenderer.renderMarkdown(infoText, infoEl, '', this);
-
         // Buttons für Aktionen
         const buttonContainer = contentEl.createEl('div', { cls: 'button-container' });
 
-        const closeButton = buttonContainer.createEl('button', { text: 'Schließen' });
-        closeButton.addEventListener('click', () => {
-            this.close();
-        });
+        if (isRemoteDay) {
+            // Remote-Tag Informationen anzeigen
+            const remoteInfo = '- **Typ:** Remote-Tag';
+            await MarkdownRenderer.renderMarkdown(remoteInfo, infoEl, '', this);
 
+            // Button zum Öffnen von Zeitplan.md hinzufügen
+            const openScheduleButton = buttonContainer.createEl('button', { text: 'Remote-Zeitplan öffnen' });
+            openScheduleButton.addEventListener('click', async () => {
+                await this.plugin.openRemoteSchedule(this.dateStr);
+                this.close();
+            });
+        }
+
+        for (const deployment of deployments) {
+            // Einsatzinformationen anzeigen
+            const deploymentInfo = `- **Typ:** Einsatz\n  **Kunde:** ${deployment.customerName}\n  **Einsatzdaten:** ${deployment.folderName}`;
+            await MarkdownRenderer.renderMarkdown(deploymentInfo, infoEl, '', this);
+
+            // Button zum Öffnen des Einsatzordners hinzufügen
+            const openDeploymentButton = buttonContainer.createEl('button', { text: `Zum Einsatz von ${deployment.customerName}` });
+            openDeploymentButton.addEventListener('click', async () => {
+                await this.plugin.openDeploymentFile(deployment);
+                this.close();
+            });
+        }
+
+        // Neuen Termin erstellen Button hinzufügen
         const newEventButton = buttonContainer.createEl('button', { text: 'Neuen Termin erstellen' });
         newEventButton.addEventListener('click', () => {
             this.close();
             this.plugin.openCreateModal(this.dateStr);
+        });
+
+        // Schließen Button hinzufügen
+        const closeButton = buttonContainer.createEl('button', { text: 'Schließen' });
+        closeButton.addEventListener('click', () => {
+            this.close();
         });
     }
 
@@ -1241,6 +1353,7 @@ class DayInfoModal extends Modal {
         contentEl.empty();
     }
 }
+
 
 // CSS-Stile hinzufügen
 const style = document.createElement('style');
@@ -1356,13 +1469,13 @@ style.textContent = `
 }
 
 .calendar-day.today {
-    border: 2px solid blue;
+    border: 2px solid var(--interactive-accent);
     border-radius: 5px;
     box-sizing: border-box;
 }
 
 .calendar-day.today .day-number {
-    background-color: blue;
+    background-color: var(--interactive-accent);
     color: white;
     border-radius: 50%;
     width: 24px;
@@ -1371,11 +1484,15 @@ style.textContent = `
     display: inline-block;
 }
 
-/* Tage aus anderen Monaten blasser darstellen */
-.calendar-day.other-month {
-    opacity: 0.5;
+/* Tageszahl für Samstage und Sonntage grau darstellen */
+.day-number.weekend {
+    color: dimgray;
 }
 
+/* Tage aus anderen Monaten blasser darstellen */
+.calendar-day.other-month {
+    color: gray
+}
 
 /* Kalender-Tageszahl */
 .day-number {
@@ -1398,7 +1515,7 @@ style.textContent = `
 
 /* Stil für Einsatz-Ereignis */
 .deployment-event {
-    background-color: var(--interactive-accent);
+    background-color: #3D90A1;
 }
 
 /* Stil für Remote-Ereignis */
@@ -1407,18 +1524,34 @@ style.textContent = `
 }
 
 /* Modal-Buttons Abstand */
-.choose-action-modal .button-container,
-.day-info-modal .button-container {
+.choose-action-modal .button-container {
     display: flex;
-    justify-content: center;
+    flex-direction: column;
+    align-items: stretch;
+    margin 5px;
     margin-top: 20px;
 }
 
-.choose-action-modal .button-container button,
-.day-info-modal .button-container button {
-    margin: 0 10px; /* Abstand zwischen den Buttons */
-    flex: 1;
+/* Modal-Buttons Abstand */
+.choose-action-modal .button-container {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    margin-top: 20px;
+}
+
+.choose-action-modal .button-container button {
+    margin: 5px 0; /* Fügt oben und unten Abstand hinzu */
     padding: 10px;
+    width: 100%;
+    box-sizing: border-box;
+}
+
+.day-info-modal .button-container button {
+    margin: 5px 0;
+    padding: 10px;
+    width: 100%;
+    box-sizing: border-box;
 }
 
 .day-info-modal .info-text {
