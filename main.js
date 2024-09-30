@@ -1195,7 +1195,7 @@ class CalendarModal extends Modal {
 
                     for (const deployment of dayDeployments) {
                         eventsEl.createEl('div', {
-                            text: `Einsatz: ${deployment.customerName}`,
+                            text: `${deployment.customerName}`,
                             cls: 'event deployment-event'
                         });
                     }
