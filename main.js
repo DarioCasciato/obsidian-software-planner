@@ -526,32 +526,58 @@ class SoftwarePlanner extends Plugin {
 
     // Methoden zum Abrufen der Einsatz- und Remote-Daten
     getDeploymentDates() {
-        const deploymentBasePath = path.join(this.app.vault.adapter.basePath, this.settings.customerDestinationPath);
-        const customers = getExistingFolders(deploymentBasePath);
+        const customerBasePath = path.join(this.app.vault.adapter.basePath, this.settings.customerDestinationPath);
+        const customers = getExistingFolders(customerBasePath);
 
         let deploymentDates = {};
         for (const customer of customers) {
-            const deploymentsPath = path.join(deploymentBasePath, customer, '1. Einsätze');
+            const deploymentsPath = path.join(customerBasePath, customer, '1. Einsätze');
             const deployments = getExistingFolders(deploymentsPath);
 
-            for (const deploymentFolder of deployments) {
-                // Extract dates from folder name
-                const dates = deploymentFolder.split(' - ');
-                for (const dateStr of dates) {
-                    if (dateStr.match(/^\d{4}-\d{2}-\d{2}$/)) {
-                        if (!deploymentDates[dateStr]) {
-                            deploymentDates[dateStr] = [];
+            for (const deployment of deployments) {
+                // Überprüfen, ob der Einsatzordner ein Datum oder einen Datumsbereich enthält
+                const dateRangeRegex = /^(\d{4}-\d{2}-\d{2})(?:\s*-\s*(\d{4}-\d{2}-\d{2}))?$/;
+                const match = deployment.match(dateRangeRegex);
+
+                if (match) {
+                    const startDateStr = match[1];
+                    const endDateStr = match[2] || startDateStr; // Wenn kein Enddatum, nur Startdatum verwenden
+
+                    const startDate = new Date(startDateStr);
+                    const endDate = new Date(endDateStr);
+
+                    // Prüfen, ob es sich um einen mehrtägigen Einsatz handelt
+                    const isSingleDay = startDateStr === endDateStr;
+
+                    // Alle Tage zwischen Start- und Enddatum sammeln
+                    let currentDate = new Date(startDate);
+                    while (currentDate <= endDate) {
+                        const currentDayOfWeek = currentDate.getDay(); // Sonntag = 0, Montag = 1, ..., Samstag = 6
+
+                        // Bei mehrtägigen Einsätzen Wochenenden ausschließen
+                        if (isSingleDay || (currentDayOfWeek !== 0 && currentDayOfWeek !== 6)) {
+                            const dateStr = currentDate.toISOString().split('T')[0];
+
+                            if (!deploymentDates[dateStr]) {
+                                deploymentDates[dateStr] = [];
+                            }
+
+                            deploymentDates[dateStr].push({
+                                customerName: customer,
+                                folderName: deployment,
+                            });
                         }
-                        deploymentDates[dateStr].push({
-                            customerName: customer,
-                            folderName: deploymentFolder
-                        });
+
+                        // Zum nächsten Tag wechseln
+                        currentDate.setDate(currentDate.getDate() + 1);
                     }
                 }
             }
         }
         return deploymentDates;
     }
+
+
 
     getRemoteDates() {
         const remoteBasePath = path.join(this.app.vault.adapter.basePath, this.settings.remoteDayDestinationPath);
@@ -1316,7 +1342,7 @@ class CalendarModal extends Modal {
 
                     for (const deployment of dayDeployments) {
                         eventsEl.createEl('div', {
-                            text: `Einsatz: ${deployment.customerName}`,
+                            text: `${deployment.customerName}`,
                             cls: 'event deployment-event'
                         });
                     }
