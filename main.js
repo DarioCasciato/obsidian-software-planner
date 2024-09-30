@@ -1337,7 +1337,7 @@ class CalendarModal extends Modal {
 
                     if (isRemoteDay) {
                         const eventClass = isRemoteDay.archived ? 'remote-event archived' : 'remote-event';
-                        eventsEl.createEl('div', { text: 'Remote-Tag', cls: `event ${eventClass}` });
+                        eventsEl.createEl('div', { text: 'Remote', cls: `event ${eventClass}` });
                     }
 
                     for (const deployment of dayDeployments) {
