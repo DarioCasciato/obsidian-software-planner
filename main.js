@@ -1194,21 +1194,21 @@ class CalendarModal extends Modal {
         // Navigations-Buttons erstellen
         const navContainer = contentEl.createEl('div', { cls: 'calendar-nav' });
 
-        const prevButton = navContainer.createEl('button', { text: '← Vorherige 4 Monate' });
+        const prevButton = navContainer.createEl('button', { text: '← Vorherige 4 Monate', cls: 'prev-button' });
         prevButton.addEventListener('click', () => {
             this.currentDate.setMonth(this.currentDate.getMonth() - 4);
             this.renderCalendar();
         });
 
-        // **Heute-Button hinzufügen**
-        const todayButton = navContainer.createEl('button', { text: 'Heute' });
+        // Heute-Button hinzufügen
+        const todayButton = navContainer.createEl('button', { text: 'Heute', cls: 'today-button' });
         todayButton.addEventListener('click', () => {
             this.currentDate = new Date();
             this.highlightedDate = null; // Highlight entfernen
             this.renderCalendar();
         });
 
-        const nextButton = navContainer.createEl('button', { text: 'Nächste 4 Monate →' });
+        const nextButton = navContainer.createEl('button', { text: 'Nächste 4 Monate →', cls: 'next-button' });
         nextButton.addEventListener('click', () => {
             this.currentDate.setMonth(this.currentDate.getMonth() + 4);
             this.renderCalendar();
@@ -1535,19 +1535,26 @@ style.textContent = `
     margin-bottom: 5px;
 }
 
-/* Kalender-Navigation */
-/* Kalender-Navigation */
 .calendar-nav {
     display: flex;
-    justify-content: space-between;
-    align-items: center; /* Zentriert die Elemente vertikal */
+    justify-content: center; /* Zentriert die Buttons horizontal */
+    align-items: center; /* Zentriert die Buttons vertikal */
     margin-bottom: 10px;
     margin-top: 20px; /* Fügt oben einen Abstand hinzu */
 }
 
 .calendar-nav button {
-    flex: 1;
-    margin: 0 5px;
+    flex: none; /* Verhindert, dass die Buttons sich dehnen */
+    margin: 0 10px;
+}
+
+.calendar-nav .today-button {
+    width: 80px; /* Feste Breite für den Heute-Button */
+}
+
+.calendar-nav .prev-button,
+.calendar-nav .next-button {
+    width: 150px; /* Feste Breite für die Monats-Buttons */
 }
 
 .calendar-nav button:nth-child(2) { /* Heute-Button */
