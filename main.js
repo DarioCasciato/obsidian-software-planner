@@ -154,12 +154,12 @@ class SoftwarePlanner extends Plugin {
         // Kalender-Befehl registrieren
         this.addCommand({
             id: 'open-calendar',
-            name: 'Kalender öffnen',
+            name: 'Planner-Kalender öffnen',
             callback: () => this.openCalendar()
         });
 
         // Kalender-Symbol zum Ribbon hinzufügen
-        this.addRibbonIcon('calendar', 'Kalender öffnen', () => this.openCalendar());
+        this.addRibbonIcon('calendar', 'Planner-Kalender öffnen', () => this.openCalendar());
 
         // Initialize calendarModalInstance
         this.calendarModalInstance = null;
@@ -218,11 +218,11 @@ class SoftwarePlanner extends Plugin {
     createRibbonIcons() {
         this.addRibbonIcon('user-plus', 'Neuer Kunde', () => this.createNewCustomer());
         this.addRibbonIcon('log-out', 'Neuer Einsatz', () => this.createNewDeployment());
-        this.addRibbonIcon('calendar-plus', 'Neuer Remote-Tag', () => this.createNewRemoteDay());
+        this.addRibbonIcon('screen-share', 'Neuer Remote-Tag', () => this.createNewRemoteDay());
         this.addRibbonIcon('clipboard-check', 'Neuer Remote-Auftrag', () => this.createNewRemoteTask());
         this.addRibbonIcon('check', 'Check Remote Aufträge', () => this.checkRemoteTasks());
         this.addRibbonIcon('archive', 'Alte Remote-Tage archivieren', () => this.archiveOldRemoteDays());
-        this.addRibbonIcon('calendar', 'Kalender öffnen', () => this.openCalendar());
+        this.addRibbonIcon('calendar', 'Planner-Kalender öffnen', () => this.openCalendar());
     }
 
     async createNewCustomer() {
@@ -543,7 +543,19 @@ class SoftwarePlanner extends Plugin {
 
     getRemoteDates() {
         const remoteBasePath = path.join(this.app.vault.adapter.basePath, this.settings.remoteDayDestinationPath);
-        const remoteDays = getExistingFolders(remoteBasePath);
+        const archivePath = path.join(remoteBasePath, '_Archiv');
+
+        let remoteDays = [];
+
+        // Remote-Tage aus dem Hauptordner sammeln
+        if (fs.existsSync(remoteBasePath)) {
+            remoteDays = remoteDays.concat(getExistingFolders(remoteBasePath));
+        }
+
+        // Remote-Tage aus dem Archivordner sammeln
+        if (fs.existsSync(archivePath)) {
+            remoteDays = remoteDays.concat(getExistingFolders(archivePath));
+        }
 
         let remoteDates = {};
         for (const day of remoteDays) {
@@ -1035,35 +1047,40 @@ class CalendarModal extends Modal {
 
             const daysEl = monthEl.createEl('div', { cls: 'calendar-days' });
 
-            // Tage des Monats generieren
-            const daysInMonth = new Date(Date.UTC(monthDate.getUTCFullYear(), monthDate.getUTCMonth() + 1, 0)).getUTCDate();
-            let firstDayOfWeek = new Date(Date.UTC(monthDate.getUTCFullYear(), monthDate.getUTCMonth(), 1)).getUTCDay();
+            // Ersten Tag der Anzeige berechnen (Anfang der Woche)
+            const firstDayOfMonth = new Date(Date.UTC(monthDate.getUTCFullYear(), monthDate.getUTCMonth(), 1));
+            const firstDayWeekday = (firstDayOfMonth.getUTCDay() + 6) % 7; // Montag = 0
+            const displayStartDate = new Date(firstDayOfMonth);
+            displayStartDate.setUTCDate(displayStartDate.getUTCDate() - firstDayWeekday);
 
-            // Anpassung für Wochenbeginn am Montag
-            firstDayOfWeek = (firstDayOfWeek + 6) % 7;
+            // Letzten Tag der Anzeige berechnen (Ende der Woche)
+            const lastDayOfMonth = new Date(Date.UTC(monthDate.getUTCFullYear(), monthDate.getUTCMonth() + 1, 0));
+            const lastDayWeekday = (lastDayOfMonth.getUTCDay() + 6) % 7; // Montag = 0
+            const displayEndDate = new Date(lastDayOfMonth);
+            displayEndDate.setUTCDate(displayEndDate.getUTCDate() + (6 - lastDayWeekday));
 
-            // Leere Felder für die Ausrichtung hinzufügen
-            for (let j = 0; j < firstDayOfWeek; j++) {
-                daysEl.createEl('div', { cls: 'calendar-day empty' });
-            }
+            let currentDate = new Date(displayStartDate);
 
-            for (let day = 1; day <= daysInMonth; day++) {
-                const date = new Date(Date.UTC(monthDate.getUTCFullYear(), monthDate.getUTCMonth(), day));
-                const dateStr = date.toISOString().split('T')[0];
-
+            while (currentDate <= displayEndDate) {
+                const dateStr = currentDate.toISOString().split('T')[0];
                 const dayEl = daysEl.createEl('div', { cls: 'calendar-day' });
 
                 // Tageszahl anzeigen
-                dayEl.createEl('div', { text: day.toString(), cls: 'day-number' });
+                dayEl.createEl('div', { text: currentDate.getUTCDate().toString(), cls: 'day-number' });
 
                 // Überprüfen, ob es heute ist
                 const today = new Date();
-                const isToday = date.getUTCFullYear() === today.getFullYear() &&
-                                date.getUTCMonth() === today.getMonth() &&
-                                date.getUTCDate() === today.getDate();
+                const isToday = currentDate.getUTCFullYear() === today.getFullYear() &&
+                                currentDate.getUTCMonth() === today.getMonth() &&
+                                currentDate.getUTCDate() === today.getDate();
 
                 if (isToday) {
                     dayEl.addClass('today');
+                }
+
+                // Tage, die nicht zum aktuellen Monat gehören, markieren
+                if (currentDate.getUTCMonth() !== monthDate.getUTCMonth()) {
+                    dayEl.addClass('other-month');
                 }
 
                 // Prüfen, ob das Datum Termine hat
@@ -1075,12 +1092,13 @@ class CalendarModal extends Modal {
                     const eventsEl = dayEl.createEl('div', { cls: 'day-events' });
 
                     if (isRemoteDay) {
-                        eventsEl.createEl('div', { text: 'Remote', cls: 'event remote-event' });
+                        const eventClass = isRemoteDay.archived ? 'remote-event archived' : 'remote-event';
+                        eventsEl.createEl('div', { text: 'Remote', cls: `event ${eventClass}` });
                     }
 
                     for (const deployment of dayDeployments) {
                         eventsEl.createEl('div', {
-                            text: `${deployment.customerName}`,
+                            text: `Einsatz: ${deployment.customerName}`,
                             cls: 'event deployment-event'
                         });
                     }
@@ -1095,6 +1113,9 @@ class CalendarModal extends Modal {
                         this.openCreateModal(dateStr);
                     }
                 });
+
+                // Zum nächsten Tag wechseln
+                currentDate.setUTCDate(currentDate.getUTCDate() + 1);
             }
         }
     }
@@ -1323,7 +1344,7 @@ style.textContent = `
 .calendar-day {
     width: 14.28%; /* Jede Woche hat 7 Tage */
     box-sizing: border-box;
-    padding: 10px;
+    padding: 8px;
     text-align: center;
     cursor: pointer;
     border: 1px solid var(--background-modifier-border);
@@ -1349,6 +1370,12 @@ style.textContent = `
     line-height: 24px;
     display: inline-block;
 }
+
+/* Tage aus anderen Monaten blasser darstellen */
+.calendar-day.other-month {
+    opacity: 0.5;
+}
+
 
 /* Kalender-Tageszahl */
 .day-number {
