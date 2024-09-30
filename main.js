@@ -275,7 +275,17 @@ class SoftwarePlanner extends Plugin {
         }
 
         const customers = getExistingFolders(path.join(this.app.vault.adapter.basePath, this.settings.customerDestinationPath));
-        const customerName = await this.promptDropdown('Kunden wählen', customers);
+
+        const customerName = await this.promptDropdown(
+            'Kunden wählen',
+            customers,
+            false,
+            null,
+            true, // allowNewCustomer
+            async (newCustomerName) => {
+                await this.createNewCustomerWithName(newCustomerName);
+            }
+        );
         if (!customerName) return;
 
         const deploymentDates = await this.promptDateRange('Startdatum des Einsatzes angeben (YYYY-MM-DD)');
@@ -297,6 +307,7 @@ class SoftwarePlanner extends Plugin {
             new Notice(`Fehler beim Erstellen des Einsatzes: ${error.message}`);
         }
     }
+
 
     async createNewRemoteTask() {
         if (!this.settings.remoteTaskTemplatePath || !this.settings.remoteDayDestinationPath) {
@@ -451,9 +462,9 @@ class SoftwarePlanner extends Plugin {
         });
     }
 
-    async promptDropdown(promptText, options, showTodayButton = false, validateTodayCallback = null) {
+    async promptDropdown(promptText, options, showTodayButton = false, validateTodayCallback = null, allowNewCustomer = false, createNewCustomerCallback = null) {
         return new Promise((resolve) => {
-            const modal = new DropdownModal(this.app, promptText, options, resolve, showTodayButton, validateTodayCallback);
+            const modal = new DropdownModal(this.app, promptText, options, resolve, showTodayButton, validateTodayCallback, allowNewCustomer, createNewCustomerCallback);
             modal.open();
         });
     }
@@ -575,17 +586,33 @@ class SoftwarePlanner extends Plugin {
         }
 
         const customers = getExistingFolders(path.join(this.app.vault.adapter.basePath, this.settings.customerDestinationPath));
-        const customerName = await this.promptDropdown('Kunden wählen', customers);
+
+        const customerName = await this.promptDropdown(
+            'Kunden wählen',
+            customers,
+            false,
+            null,
+            true, // allowNewCustomer
+            async (newCustomerName) => {
+                await this.createNewCustomerWithName(newCustomerName);
+            }
+        );
         if (!customerName) return;
 
-        const deploymentDates = await this.promptDateRange('Startdatum des Einsatzes angeben (YYYY-MM-DD)', deploymentDate, false);
+        const deploymentDates = await this.promptDateRange('Startdatum des Einsatzes angeben (YYYY-MM-DD)', deploymentDate);
         if (!deploymentDates) return;
 
         const folderName = deploymentDates.endDate
             ? `${deploymentDates.startDate} - ${deploymentDates.endDate}`
             : deploymentDates.startDate;
 
-        const customerPath = path.join(this.app.vault.adapter.basePath, this.settings.customerDestinationPath, customerName, '1. Einsätze', folderName);
+        const customerPath = path.join(
+            this.app.vault.adapter.basePath,
+            this.settings.customerDestinationPath,
+            customerName,
+            '1. Einsätze',
+            folderName
+        );
         const templatePath = path.join(this.app.vault.adapter.basePath, this.settings.deploymentTemplatePath);
 
         try {
@@ -601,6 +628,7 @@ class SoftwarePlanner extends Plugin {
             this.calendarModalInstance.refreshCalendar();
         }
     }
+
 
     async createNewRemoteDayWithDate(remoteDay) {
         if (!this.settings.remoteDayTemplatePath || !this.settings.remoteDayDestinationPath) {
@@ -729,6 +757,24 @@ class SoftwarePlanner extends Plugin {
             }
         } else {
             new Notice('Zeitplan.md nicht gefunden.');
+        }
+    }
+
+    async createNewCustomerWithName(customerName) {
+        if (!this.settings.customerTemplatePath || !this.settings.customerDestinationPath) {
+            new Notice('Setze die Kunden Vorlage- und Zielpfäde in den Einstellungen.');
+            return;
+        }
+
+        const customerPath = path.join(this.app.vault.adapter.basePath, this.settings.customerDestinationPath, customerName);
+        const templatePath = path.join(this.app.vault.adapter.basePath, this.settings.customerTemplatePath);
+
+        try {
+            await copyFolder(templatePath, customerPath);
+            new Notice(`Kundenordner erstellt: ${customerName}`);
+        } catch (error) {
+            console.error(`Fehler beim Erstellen vom Kundenordner: ${error.message}`);
+            new Notice(`Fehler beim Erstellen vom Kundenordner: ${error.message}`);
         }
     }
 }
@@ -905,13 +951,15 @@ class DateRangePromptModal extends Modal {
 
 // DropdownModal class
 class DropdownModal extends Modal {
-    constructor(app, promptText, options, callback, showTodayButton = false, validateTodayCallback = null) {
+    constructor(app, promptText, options, callback, showTodayButton = false, validateTodayCallback = null, allowNewCustomer = false, createNewCustomerCallback = null) {
         super(app);
         this.promptText = promptText;
         this.options = options;
         this.callback = callback;
         this.showTodayButton = showTodayButton;
         this.validateTodayCallback = validateTodayCallback;
+        this.allowNewCustomer = allowNewCustomer;
+        this.createNewCustomerCallback = createNewCustomerCallback;
     }
 
     onOpen() {
@@ -921,6 +969,7 @@ class DropdownModal extends Modal {
         // Create container for input and dropdown
         const containerEl = contentEl.createEl('div', { cls: 'dropdown-container' });
 
+        // Optional 'Heute' Button
         if (this.showTodayButton) {
             const todayButtonEl = containerEl.createEl('button', { text: 'Heute', cls: 'dropdown-button' });
             todayButtonEl.addEventListener('click', () => {
@@ -942,6 +991,7 @@ class DropdownModal extends Modal {
         const dropdownEl = containerEl.createEl('select', { cls: 'dropdown' });
         dropdownEl.size = this.options.length > 10 ? 10 : this.options.length;
 
+        // Erstellen der Dropdown-Optionen
         this.options.forEach(option => {
             const optionEl = dropdownEl.createEl('option', { text: option });
             optionEl.value = option;
@@ -957,11 +1007,13 @@ class DropdownModal extends Modal {
         inputEl.addEventListener('input', () => {
             const filter = inputEl.value.toLowerCase();
             let firstVisibleOption = null;
+            let visibleOptionsCount = 0;
             for (let i = 0; i < dropdownEl.options.length; i++) {
                 const option = dropdownEl.options[i];
                 if (option.text.toLowerCase().includes(filter)) {
                     option.style.display = '';
                     if (!firstVisibleOption) firstVisibleOption = option;
+                    visibleOptionsCount++;
                 } else {
                     option.style.display = 'none';
                 }
@@ -969,6 +1021,7 @@ class DropdownModal extends Modal {
             if (firstVisibleOption) {
                 dropdownEl.value = firstVisibleOption.value;
             }
+            dropdownEl.size = visibleOptionsCount > 10 ? 10 : visibleOptionsCount;
         });
 
         // Handle keydown events for better navigation
@@ -998,6 +1051,55 @@ class DropdownModal extends Modal {
 
         // Append elements to contentEl
         contentEl.appendChild(containerEl);
+
+        // Neuen Kunden erstellen Button hinzufügen, falls erlaubt
+        if (this.allowNewCustomer) {
+            const newCustomerButton = contentEl.createEl('button', { text: 'Neuen Kunden erstellen', cls: 'new-customer-button' });
+            newCustomerButton.addEventListener('click', () => {
+                this.openNewCustomerModal();
+            });
+        }
+    }
+
+    // Methode zum Öffnen des Modals für neuen Kundennamen
+    openNewCustomerModal() {
+        const modal = new PromptModal(this.app, 'Neuen Kundennamen eingeben', async (newCustomerName) => {
+            if (newCustomerName) {
+                // Erstelle neuen Kunden
+                if (this.createNewCustomerCallback) {
+                    await this.createNewCustomerCallback(newCustomerName);
+                    // Aktualisiere die Optionen mit dem neuen Kunden
+                    this.options.push(newCustomerName);
+                    // Aktualisiere das Dropdown
+                    this.refreshDropdown();
+                    // Setze den neuen Kunden als ausgewählt
+                    this.callback(newCustomerName);
+                    this.close();
+                } else {
+                    new Notice('Fehler: createNewCustomerCallback nicht definiert.');
+                }
+            } else {
+                new Notice('Kein Kundennamen eingegeben.');
+            }
+        });
+        modal.open();
+    }
+
+    // Methode zum Aktualisieren des Dropdowns
+    refreshDropdown() {
+        const dropdownEl = this.contentEl.querySelector('.dropdown');
+        dropdownEl.innerHTML = ''; // Entferne alte Optionen
+
+        this.options.forEach(option => {
+            const optionEl = dropdownEl.createEl('option', { text: option });
+            optionEl.value = option;
+
+            // Add double-click event listener
+            optionEl.addEventListener('dblclick', () => {
+                this.callback(optionEl.value);
+                this.close();
+            });
+        });
     }
 
     onClose() {
@@ -1070,6 +1172,7 @@ class CalendarModal extends Modal {
         super(app);
         this.plugin = plugin;
         this.currentDate = new Date(); // Startdatum ist das aktuelle Datum
+        this.highlightedDate = null; // Für das zweite Feature
     }
 
     onOpen() {
@@ -1097,6 +1200,14 @@ class CalendarModal extends Modal {
             this.renderCalendar();
         });
 
+        // **Heute-Button hinzufügen**
+        const todayButton = navContainer.createEl('button', { text: 'Heute' });
+        todayButton.addEventListener('click', () => {
+            this.currentDate = new Date();
+            this.highlightedDate = null; // Highlight entfernen
+            this.renderCalendar();
+        });
+
         const nextButton = navContainer.createEl('button', { text: 'Nächste 4 Monate →' });
         nextButton.addEventListener('click', () => {
             this.currentDate.setMonth(this.currentDate.getMonth() + 4);
@@ -1111,6 +1222,7 @@ class CalendarModal extends Modal {
             const selectedDate = new Date(searchInput.value);
             if (!isNaN(selectedDate)) {
                 this.currentDate = selectedDate;
+                this.highlightedDate = selectedDate; // Datum zum Hervorheben setzen
                 this.renderCalendar();
             }
         });
@@ -1119,8 +1231,6 @@ class CalendarModal extends Modal {
 
         this.renderCalendar();
     }
-
-    // In der Klasse CalendarModal:
 
     renderCalendar() {
         const { calendarContainer } = this;
@@ -1131,6 +1241,7 @@ class CalendarModal extends Modal {
         const remoteDays = this.plugin.getRemoteDates();
 
         const startMonth = new Date(Date.UTC(this.currentDate.getUTCFullYear(), this.currentDate.getUTCMonth(), 1));
+
         for (let i = 0; i < 4; i++) {
             const monthDate = new Date(Date.UTC(startMonth.getUTCFullYear(), startMonth.getUTCMonth() + i, 1));
             const monthEl = calendarContainer.createEl('div', { cls: 'calendar-month' });
@@ -1169,12 +1280,22 @@ class CalendarModal extends Modal {
                     dayEl.addClass('today');
                 }
 
+                // **Überprüfen, ob es das hervorgehobene Datum ist**
+                if (this.highlightedDate) {
+                    const isHighlighted = currentDate.getUTCFullYear() === this.highlightedDate.getUTCFullYear() &&
+                                          currentDate.getUTCMonth() === this.highlightedDate.getUTCMonth() &&
+                                          currentDate.getUTCDate() === this.highlightedDate.getUTCDate();
+                    if (isHighlighted) {
+                        dayEl.addClass('highlighted-date');
+                    }
+                }
+
                 // Tage, die nicht zum aktuellen Monat gehören, markieren
                 if (currentDate.getUTCMonth() !== monthDate.getUTCMonth()) {
                     dayEl.addClass('other-month');
                 }
 
-                // **Hier prüfen wir, ob der aktuelle Tag ein Samstag oder Sonntag ist**
+                // **Prüfen, ob der aktuelle Tag ein Samstag oder Sonntag ist**
                 const dayOfWeek = currentDate.getUTCDay(); // Sonntag = 0, Montag = 1, ..., Samstag = 6
                 if (dayOfWeek === 0 || dayOfWeek === 6) {
                     dayNumberEl.addClass('weekend');
@@ -1195,7 +1316,7 @@ class CalendarModal extends Modal {
 
                     for (const deployment of dayDeployments) {
                         eventsEl.createEl('div', {
-                            text: `${deployment.customerName}`,
+                            text: `Einsatz: ${deployment.customerName}`,
                             cls: 'event deployment-event'
                         });
                     }
@@ -1415,11 +1536,29 @@ style.textContent = `
 }
 
 /* Kalender-Navigation */
+/* Kalender-Navigation */
 .calendar-nav {
     display: flex;
     justify-content: space-between;
+    align-items: center; /* Zentriert die Elemente vertikal */
     margin-bottom: 10px;
     margin-top: 20px; /* Fügt oben einen Abstand hinzu */
+}
+
+.calendar-nav button {
+    flex: 1;
+    margin: 0 5px;
+}
+
+.calendar-nav button:nth-child(2) { /* Heute-Button */
+    flex: none;
+}
+
+/* Hervorgehobenes Datum nach "Springe zu Datum" */
+.calendar-day.highlighted-date {
+    border: 2px solid lightgray;
+    border-radius: 5px;
+    box-sizing: border-box;
 }
 
 /* Kalender-Suche */
@@ -1543,6 +1682,14 @@ style.textContent = `
 .choose-action-modal .button-container button {
     margin: 5px 0; /* Fügt oben und unten Abstand hinzu */
     padding: 10px;
+    width: 100%;
+    box-sizing: border-box;
+}
+
+/* Button zum Erstellen eines neuen Kunden */
+.new-customer-button {
+    margin-top: 10px;
+    padding: 5px 10px;
     width: 100%;
     box-sizing: border-box;
 }
