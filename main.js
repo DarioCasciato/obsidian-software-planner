@@ -27,7 +27,6 @@ async function copyFolder(src, dest) {
     for (let entry of entries) {
         const srcPath = path.join(src, entry.name);
         const destPath = path.join(dest, entry.name);
-        console.log('Copying:', srcPath, 'to', destPath);
 
         if (entry.isDirectory()) {
             await copyFolder(srcPath, destPath);
@@ -164,6 +163,12 @@ class SoftwarePlanner extends Plugin {
 
         // Initialize calendarModalInstance
         this.calendarModalInstance = null;
+
+        // Initialize Status Bar Button
+        this.neuerAuftragButton = null;
+
+        // Listen to active file changes
+        this.registerEvent(this.app.workspace.on('active-leaf-change', this.onActiveLeafChange.bind(this)));
     }
 
     onunload() {
@@ -178,6 +183,15 @@ class SoftwarePlanner extends Plugin {
         await this.saveData(this.settings);
     }
 
+    async createNewRemoteDayPrompt() {
+        const dateStr = await this.promptSingleDate('Datum des Remote-Tags eingeben (YYYY-MM-DD)');
+        if (!dateStr) {
+            new Notice('Kein Datum eingegeben.');
+            return;
+        }
+        await this.createNewRemoteDay(dateStr);
+    }
+
     registerCommands() {
         this.addCommand({
             id: 'create-new-customer',
@@ -188,7 +202,12 @@ class SoftwarePlanner extends Plugin {
         this.addCommand({
             id: 'create-new-remote-day',
             name: 'Neuen Remote-Tag erstellen',
-            callback: () => this.createNewRemoteDay()
+            callback: async () => {
+                const dateStr = await this.promptSingleDate('Datum des Remote-Tags auswählen');
+                if (dateStr) {
+                    await this.createNewRemoteDay(dateStr);
+                }
+            }
         });
 
         this.addCommand({
@@ -219,11 +238,28 @@ class SoftwarePlanner extends Plugin {
     createRibbonIcons() {
         this.addRibbonIcon('user-plus', 'Neuer Kunde', () => this.createNewCustomer());
         this.addRibbonIcon('log-out', 'Neuer Einsatz', () => this.createNewDeployment());
-        this.addRibbonIcon('screen-share', 'Neuer Remote-Tag', () => this.createNewRemoteDay());
+        // Ribbon Icon für "Neuen Remote-Tag" aktualisieren
+        this.addRibbonIcon('screen-share', 'Neuer Remote-Tag', async () => {
+            const dateStr = await this.promptSingleDate('Datum des Remote-Tags auswählen');
+            if (dateStr) {
+                await this.createNewRemoteDay(dateStr);
+            }
+        });
         this.addRibbonIcon('clipboard-check', 'Neuer Remote-Auftrag', () => this.createNewRemoteTask());
         this.addRibbonIcon('check', 'Check Remote Aufträge', () => this.checkRemoteTasks());
         this.addRibbonIcon('archive', 'Alte Remote-Tage archivieren', () => this.archiveOldRemoteDays());
         this.addRibbonIcon('calendar', 'Planner-Kalender öffnen', () => this.openCalendar());
+    }
+
+    async openFile(filePath) {
+        const filePathInVault = path.relative(this.app.vault.adapter.basePath, filePath).replace(/\\/g, '/');
+        const file = this.app.vault.getAbstractFileByPath(filePathInVault);
+
+        if (file && file instanceof TFile) {
+            await this.app.workspace.getLeaf().openFile(file);
+        } else {
+            new Notice('Datei nicht gefunden.');
+        }
     }
 
     async createNewCustomer() {
@@ -247,26 +283,48 @@ class SoftwarePlanner extends Plugin {
         }
     }
 
-    async createNewRemoteDay() {
-        if (!this.settings.remoteDayTemplatePath || !this.settings.remoteDayDestinationPath) {
-            new Notice('Setze die Remote-Tag Vorlage- und Zielpfäde in den Einstellungen.');
+    async createNewRemoteDay(dateStr) {
+        if (!this.settings.remoteDayDestinationPath) {
+            new Notice('Remote Tag Zielverzeichnis Pfad ist nicht gesetzt. Bitte überprüfen Sie die Einstellungen.');
             return;
         }
 
-        const remoteDay = await this.promptSingleDate('Remote-Tag Datum eingeben (YYYY-MM-DD)');
-        if (!remoteDay) return;
-
-        const remoteDayPath = path.join(this.app.vault.adapter.basePath, this.settings.remoteDayDestinationPath, remoteDay);
+        // Entfernt abschließende Slashes aus dem Zielpfad
+        const remoteDayDestinationPath = this.settings.remoteDayDestinationPath.replace(/\/+$/, '');
+        const remoteDayPath = path.join(this.app.vault.adapter.basePath, remoteDayDestinationPath, dateStr);
         const templatePath = path.join(this.app.vault.adapter.basePath, this.settings.remoteDayTemplatePath);
 
         try {
             await copyFolder(templatePath, remoteDayPath);
-            new Notice(`Remote-Tag Ordner erstellt: ${remoteDay}`);
+            new Notice(`Remote-Tag erstellt: ${dateStr}`);
+
+            // Öffne die Zeitplan.md Datei
+            const scheduleFilePath = path.join(remoteDayPath, 'Zeitplan.md');
+            await this.openFile(scheduleFilePath);
+
+            // Manuelles Aufrufen von onActiveLeafChange zur Sicherstellung der Aktualisierung
+            this.onActiveLeafChange();
         } catch (error) {
-            console.error(`Fehler beim Erstellen des Remote-Tag Ordners: ${error.message}`);
-            new Notice(`Fehler beim Erstellen des Remote-Tag Ordners: ${error.message}`);
+            console.error(`Fehler beim Erstellen des Remote-Tags: ${error.message}`);
+            new Notice(`Fehler beim Erstellen des Remote-Tags: ${error.message}`);
         }
     }
+
+    onActiveLeafChange() {
+        const activeFile = this.app.workspace.getActiveFile();
+        if (activeFile && this.isScheduleFile(activeFile)) {
+            const date = this.getDateFromScheduleFile(activeFile);
+            if (date) {
+                this.addNeuerAuftragButton(date);
+            } else {
+                console.error('Datum konnte aus dem aktiven Zeitplan nicht extrahiert werden.');
+                this.removeNeuerAuftragButton();
+            }
+        } else {
+            this.removeNeuerAuftragButton();
+        }
+    }
+
 
     async createNewDeployment() {
         if (!this.settings.deploymentTemplatePath || !this.settings.customerDestinationPath) {
@@ -359,7 +417,6 @@ class SoftwarePlanner extends Plugin {
                 const destinationPath = path.join(archivePath, remoteDay);
 
                 fs.renameSync(sourcePath, destinationPath);
-                console.log(`Remote-Tag ${remoteDay} wurde ins Archiv verschoben.`);
             }
         }
 
@@ -434,7 +491,6 @@ class SoftwarePlanner extends Plugin {
             content = content.replace('**Datum**:', `**Datum**: ${deploymentDate}`);
 
             await fs.promises.writeFile(einsatzFilePath, content, 'utf8');
-            console.log(`Einsatz.md erfolgreich aktualisiert: Kunde - ${customerName}, Datum - ${deploymentDate}`);
         } catch (error) {
             console.error(`Fehler beim Aktualisieren der Einsatz.md: ${error.message}`);
             new Notice(`Fehler beim Aktualisieren der Einsatz.md: ${error.message}`);
@@ -716,9 +772,6 @@ class SoftwarePlanner extends Plugin {
         // Pfad relativ zum Vault erhalten
         const filePathInVault = path.relative(baseVaultPath, deploymentFilePath).replace(/\\/g, '/');
 
-        console.log('Deployment File Path:', deploymentFilePath);
-        console.log('File Path in Vault:', filePathInVault);
-
         // Datei in Obsidian abrufen
         const file = this.app.vault.getAbstractFileByPath(filePathInVault);
 
@@ -766,8 +819,6 @@ class SoftwarePlanner extends Plugin {
         // Pfad relativ zum Vault erhalten
         const filePathInVault = path.relative(baseVaultPath, scheduleFilePath).replace(/\\/g, '/');
 
-        console.log('Schedule File Path:', scheduleFilePath);
-        console.log('File Path in Vault:', filePathInVault);
 
         // Datei in Obsidian abrufen
         const file = this.app.vault.getAbstractFileByPath(filePathInVault);
@@ -801,6 +852,89 @@ class SoftwarePlanner extends Plugin {
         } catch (error) {
             console.error(`Fehler beim Erstellen vom Kundenordner: ${error.message}`);
             new Notice(`Fehler beim Erstellen vom Kundenordner: ${error.message}`);
+        }
+    }
+
+    async createNewRemoteTaskFromSchedule(date) {
+        if (!date) {
+            console.error('Kein gültiges Datum übergeben.');
+            new Notice('Kein gültiges Datum gefunden.');
+            return;
+        }
+
+        // Schritt 1: Auftragsnamen abfragen
+        const taskName = await this.promptUser('Auftragsnamen eingeben');
+        if (!taskName) {
+            new Notice('Kein Auftragsnamen eingegeben.');
+            return;
+        }
+
+        // Schritt 2: Pfade definieren
+        if (!this.settings.remoteDayDestinationPath) {
+            new Notice('Remote Tag Zielverzeichnis Pfad ist nicht gesetzt. Bitte überprüfen Sie die Einstellungen.');
+            return;
+        }
+
+        const remoteTaskPath = path.join(this.app.vault.adapter.basePath, this.settings.remoteDayDestinationPath, date, taskName);
+        const templatePath = path.join(this.app.vault.adapter.basePath, this.settings.remoteTaskTemplatePath);
+        const schedulePath = path.join(this.app.vault.adapter.basePath, this.settings.remoteDayDestinationPath, date, 'Zeitplan.md');
+        const taskFilePath = path.join(remoteTaskPath, 'Auftrag.md');
+        const taskFileTemplatePath = path.join(templatePath, 'Auftrag.md');
+
+        // Schritt 3: Erstellen des Auftrag-Ordners und der Datei
+        try {
+            await copyFolder(templatePath, remoteTaskPath);
+            await addTaskToSchedule(schedulePath, taskName);
+            await createUpdatedTaskFile(taskFileTemplatePath, taskFilePath, taskName);
+            new Notice(`Remote Auftragsordner erstellt für "${taskName}" am ${date}`);
+        } catch (error) {
+            console.error(`Fehler beim Erstellen des Remote Auftrags: ${error.message}`);
+            new Notice(`Fehler beim Erstellen des Remote Auftrags: ${error.message}`);
+        }
+    }
+
+    isScheduleFile(file) {
+        // Prüfen, ob die Datei 'Zeitplan.md' ist und sich im Remote-Tag Ordner befindet
+        const remoteDayPath = this.settings.remoteDayDestinationPath.replace(/\\/g, '/'); // Windows Pfade anpassen
+        const escapedPath = remoteDayPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); // Regex-Sonderzeichen escapen
+        const regex = new RegExp(`^${escapedPath}/\\d{4}-\\d{2}-\\d{2}/Zeitplan\\.md$`);
+        return regex.test(file.path);
+    }
+
+
+    getDateFromScheduleFile(file) {
+        // Extrahieren des Datums aus dem Pfad, z.B. 'Remote-Tage/2024-10-01/Zeitplan.md'
+        const parts = file.path.split('/');
+        if (parts.length < 3) {
+            console.error('Ungültiger Pfad für Zeitplan.md:', file.path);
+            return null;
+        }
+        const remoteDayFolder = parts[parts.length - 2];
+        return remoteDayFolder;
+    }
+
+
+    addNeuerAuftragButton(date) {
+        // Entfernt den bestehenden Button, falls vorhanden
+        this.removeNeuerAuftragButton();
+
+        this.neuerAuftragButton = this.addStatusBarItem('statusbar-right');
+        this.neuerAuftragButton.setText('Neuer Auftrag');
+        this.neuerAuftragButton.setAttr('aria-label', 'Neuen Auftrag erstellen');
+        this.neuerAuftragButton.addClass('neuer-auftrag-statusbar-button'); // Für eventuelles CSS Styling
+
+        // Korrigierte Event-Zuweisung mit 'addEventListener'
+        this.neuerAuftragButton.addEventListener('click', () => {
+            this.createNewRemoteTaskFromSchedule(date);
+        });
+    }
+
+
+
+    removeNeuerAuftragButton() {
+        if (this.neuerAuftragButton) {
+            this.neuerAuftragButton.remove();
+            this.neuerAuftragButton = null;
         }
     }
 }
@@ -887,6 +1021,7 @@ class SingleDatePromptModal extends Modal {
         contentEl.empty();
     }
 }
+
 
 class DateRangePromptModal extends Modal {
     constructor(app, promptText, callback, defaultStartDate = null, defaultMultiDay = false) {
@@ -1744,6 +1879,20 @@ style.textContent = `
     max-width: none; /* Entfernt die maximale Breite */
     width: 100%;
     height: 100%;
+}
+
+.neuer-auftrag-statusbar-button {
+    cursor: pointer;
+    padding: 0 10px;
+    font-size: 14px;
+    background-color: var(--interactive-accent);
+    color: white;
+    border-radius: 4px;
+    margin-left: 10px;
+}
+
+.neuer-auftrag-statusbar-button:hover {
+    background-color: var(--interactive-accent-hover);
 }
 `;
 document.head.appendChild(style);
