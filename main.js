@@ -618,9 +618,21 @@ class SoftwarePlanner extends Plugin {
                                 deploymentDates[dateStr] = [];
                             }
 
+                            // Pfad zur Einsatz.md Datei
+                            const einsatzMdPath = path.join(this.app.vault.adapter.basePath, this.settings.customerDestinationPath, customer, '1. Einsätze', deployment, 'Einsatz.md');
+
+                            let completed = false;
+                            try {
+                                const einsatzContent = fs.readFileSync(einsatzMdPath, 'utf8');
+                                completed = einsatzContent.includes('- [x] **Auftrag abgeschlossen**');
+                            } catch (error) {
+                                console.error(`Fehler beim Lesen von ${einsatzMdPath}: ${error.message}`);
+                            }
+
                             deploymentDates[dateStr].push({
                                 customerName: customer,
                                 folderName: deployment,
+                                completed: completed
                             });
                         }
 
@@ -632,6 +644,7 @@ class SoftwarePlanner extends Plugin {
         }
         return deploymentDates;
     }
+
 
 
 
@@ -1476,9 +1489,10 @@ class CalendarModal extends Modal {
                     }
 
                     for (const deployment of dayDeployments) {
+                        const eventClass = deployment.completed ? 'deployment-completed-event' : 'deployment-event';
                         eventsEl.createEl('div', {
                             text: `${deployment.customerName}`,
-                            cls: 'event deployment-event'
+                            cls: `event ${eventClass}`
                         });
                     }
                 }
@@ -1498,6 +1512,7 @@ class CalendarModal extends Modal {
             }
         }
     }
+
 
 
     openCreateModal(dateStr) {
@@ -1823,6 +1838,10 @@ style.textContent = `
 /* Stil für Einsatz-Ereignis */
 .deployment-event {
     background-color: #3D90A1;
+}
+
+.deployment-completed-event {
+    background-color: #28a745; /* Grün */
 }
 
 /* Stil für Remote-Ereignis */
