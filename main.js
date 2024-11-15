@@ -44,20 +44,6 @@ function getExistingFolders(basePath) {
         .map(entry => entry.name);
 }
 
-// Utility function to add task to schedule
-async function addTaskToSchedule(schedulePath, taskName) {
-    let scheduleContent = await fs.promises.readFile(schedulePath, 'utf8');
-    const taskEntry = `- [ ] ${taskName}\n`;
-
-    const taskSection = '## Aufträge\n\n';
-    const insertIndex = scheduleContent.indexOf(taskSection) + taskSection.length;
-    if (insertIndex === -1) {
-        throw new Error('Aufgabenabschnitt nicht in Zeitplan gefunden');
-    }
-
-    scheduleContent = scheduleContent.slice(0, insertIndex) + taskEntry + scheduleContent.slice(insertIndex);
-    await fs.promises.writeFile(schedulePath, scheduleContent, 'utf8');
-}
 
 // Utility function to create and update the task file
 async function createUpdatedTaskFile(templatePath, destinationPath, customerName) {
@@ -868,6 +854,32 @@ class SoftwarePlanner extends Plugin {
         }
     }
 
+    // Utility function to add task to schedule
+    async addTaskToSchedule(schedulePath, taskName) {
+        let scheduleContent = await fs.promises.readFile(schedulePath, 'utf8');
+        const taskSection = '## Aufträge\n\n';
+        const insertIndex = scheduleContent.indexOf(taskSection) + taskSection.length;
+        if (insertIndex === -1) {
+            throw new Error('Aufgabenabschnitt nicht in Zeitplan gefunden');
+        }
+
+        // Berechne den relativen Pfad zur Auftrag.md Datei
+        const scheduleDir = path.dirname(schedulePath);
+        const taskFolderPath = path.join(scheduleDir, taskName);
+        const taskFilePath = path.join(taskFolderPath, 'Auftrag.md');
+
+        // Berechne den Pfad relativ zum Vault
+        const vaultPath = this.app.vault.adapter.basePath;
+        const relativePath = path.relative(vaultPath, taskFilePath).replace(/\\/g, '/');
+
+        // Erstelle den Link
+        const taskEntry = `- [ ] [[${relativePath}|${taskName}]]\n`;
+
+        // Füge den Link in den Zeitplan ein
+        scheduleContent = scheduleContent.slice(0, insertIndex) + taskEntry + scheduleContent.slice(insertIndex);
+        await fs.promises.writeFile(schedulePath, scheduleContent, 'utf8');
+    }
+
     async createNewRemoteTaskFromSchedule(date) {
         if (!date) {
             console.error('Kein gültiges Datum übergeben.');
@@ -897,7 +909,7 @@ class SoftwarePlanner extends Plugin {
         // Schritt 3: Erstellen des Auftrag-Ordners und der Datei
         try {
             await copyFolder(templatePath, remoteTaskPath);
-            await addTaskToSchedule(schedulePath, taskName);
+            await this.addTaskToSchedule(schedulePath, taskName); // Anpassung hier
             await createUpdatedTaskFile(taskFileTemplatePath, taskFilePath, taskName);
             new Notice(`Remote Auftragsordner erstellt für "${taskName}" am ${date}`);
         } catch (error) {
