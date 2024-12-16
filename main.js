@@ -574,55 +574,87 @@ class SoftwarePlanner extends Plugin {
         let deploymentDates = {};
         for (const customer of customers) {
             const deploymentsPath = path.join(customerBasePath, customer, '1. Einsätze');
+            if (!fs.existsSync(deploymentsPath)) {
+                continue;
+            }
             const deployments = getExistingFolders(deploymentsPath);
 
             for (const deployment of deployments) {
-                // Überprüfen, ob der Einsatzordner ein Datum oder einen Datumsbereich enthält
                 const dateRangeRegex = /^(\d{4}-\d{2}-\d{2})(?:\s*-\s*(\d{4}-\d{2}-\d{2}))?$/;
                 const match = deployment.match(dateRangeRegex);
 
                 if (match) {
                     const startDateStr = match[1];
-                    const endDateStr = match[2] || startDateStr; // Wenn kein Enddatum, nur Startdatum verwenden
-
+                    const endDateStr = match[2] || startDateStr; // single-day if no end date
                     const startDate = new Date(startDateStr);
                     const endDate = new Date(endDateStr);
-
-                    // Prüfen, ob es sich um einen mehrtägigen Einsatz handelt
                     const isSingleDay = startDateStr === endDateStr;
 
-                    // Alle Tage zwischen Start- und Enddatum sammeln
                     let currentDate = new Date(startDate);
                     while (currentDate <= endDate) {
-                        const currentDayOfWeek = currentDate.getDay(); // Sonntag = 0, Montag = 1, ..., Samstag = 6
-
-                        // Bei mehrtägigen Einsätzen Wochenenden ausschließen
+                        const currentDayOfWeek = currentDate.getDay();
                         if (isSingleDay || (currentDayOfWeek !== 0 && currentDayOfWeek !== 6)) {
                             const dateStr = currentDate.toISOString().split('T')[0];
+
+                            // Path to Einsatz.md
+                            const einsatzMdPath = path.join(
+                                this.app.vault.adapter.basePath,
+                                this.settings.customerDestinationPath,
+                                customer,
+                                '1. Einsätze',
+                                deployment,
+                                'Einsatz.md'
+                            );
+
+                            let completed = false;
+                            let preCheckDone = false;
+
+                            try {
+                                const einsatzContent = fs.readFileSync(einsatzMdPath, 'utf8');
+                                // Check if completed (green)
+                                completed = einsatzContent.includes('- [x] **Auftrag abgeschlossen**');
+
+                                if (!completed) {
+                                    // Check for "Abklären" section
+                                    const abklaerenSectionRegex = /#### Abklären([\s\S]*?)(?=####|$)/;
+                                    const abklaerenMatch = einsatzContent.match(abklaerenSectionRegex);
+
+                                    if (abklaerenMatch) {
+                                        // Extract tasks in "Abklären" section
+                                        const abklaerenContent = abklaerenMatch[1];
+                                        // Find all checklist lines: - [ ] or - [x]
+                                        const tasks = abklaerenContent.match(/- \[[ x]\]/g);
+
+                                        if (tasks && tasks.length > 0) {
+                                            // Check if all are checked
+                                            const allChecked = tasks.every(t => t.includes('- [x]'));
+                                            preCheckDone = allChecked;
+                                        } else {
+                                            // If no tasks found, we consider preCheckDone = true
+                                            // (though it's unusual to have "Abklären" with no tasks)
+                                            preCheckDone = true;
+                                        }
+                                    } else {
+                                        // No "Abklären" section found, preCheckDone = true by default
+                                        preCheckDone = true;
+                                    }
+                                }
+                            } catch (error) {
+                                console.error(`Fehler beim Lesen von ${einsatzMdPath}: ${error.message}`);
+                            }
 
                             if (!deploymentDates[dateStr]) {
                                 deploymentDates[dateStr] = [];
                             }
 
-                            // Pfad zur Einsatz.md Datei
-                            const einsatzMdPath = path.join(this.app.vault.adapter.basePath, this.settings.customerDestinationPath, customer, '1. Einsätze', deployment, 'Einsatz.md');
-
-                            let completed = false;
-                            try {
-                                const einsatzContent = fs.readFileSync(einsatzMdPath, 'utf8');
-                                completed = einsatzContent.includes('- [x] **Auftrag abgeschlossen**');
-                            } catch (error) {
-                                console.error(`Fehler beim Lesen von ${einsatzMdPath}: ${error.message}`);
-                            }
-
                             deploymentDates[dateStr].push({
                                 customerName: customer,
                                 folderName: deployment,
-                                completed: completed
+                                completed: completed,
+                                preCheckDone: completed ? true : preCheckDone // if completed, preCheckDone doesn't matter
                             });
                         }
 
-                        // Zum nächsten Tag wechseln
                         currentDate.setDate(currentDate.getDate() + 1);
                     }
                 }
@@ -630,6 +662,7 @@ class SoftwarePlanner extends Plugin {
         }
         return deploymentDates;
     }
+
 
 
 
@@ -1435,7 +1468,7 @@ class CalendarModal extends Modal {
 
             const daysEl = monthEl.createEl('div', { cls: 'calendar-days' });
 
-            // Ersten Tag der Anzeige berechnen (Anfang der Woche)
+            // Ersten Tag der Anzeige berechnen (Anfang der Woche, Montag = 0)
             const firstDayOfMonth = new Date(Date.UTC(monthDate.getUTCFullYear(), monthDate.getUTCMonth(), 1));
             const firstDayWeekday = (firstDayOfMonth.getUTCDay() + 6) % 7; // Montag = 0
             const displayStartDate = new Date(firstDayOfMonth);
@@ -1466,7 +1499,7 @@ class CalendarModal extends Modal {
                     dayEl.addClass('today');
                 }
 
-                // **Überprüfen, ob es das hervorgehobene Datum ist**
+                // Überprüfen, ob es das hervorgehobene Datum ist
                 if (this.highlightedDate) {
                     const isHighlighted = currentDate.getUTCFullYear() === this.highlightedDate.getUTCFullYear() &&
                                           currentDate.getUTCMonth() === this.highlightedDate.getUTCMonth() &&
@@ -1481,7 +1514,7 @@ class CalendarModal extends Modal {
                     dayEl.addClass('other-month');
                 }
 
-                // **Prüfen, ob der aktuelle Tag ein Samstag oder Sonntag ist**
+                // Prüfen, ob Wochenende
                 const dayOfWeek = currentDate.getUTCDay(); // Sonntag = 0, Montag = 1, ..., Samstag = 6
                 if (dayOfWeek === 0 || dayOfWeek === 6) {
                     dayNumberEl.addClass('weekend');
@@ -1501,7 +1534,21 @@ class CalendarModal extends Modal {
                     }
 
                     for (const deployment of dayDeployments) {
-                        const eventClass = deployment.completed ? 'deployment-completed-event' : 'deployment-event';
+                        let eventClass;
+                        if (deployment.completed) {
+                            // Green
+                            eventClass = 'deployment-completed-event';
+                        } else {
+                            // Not completed, check preCheckDone
+                            if (deployment.preCheckDone) {
+                                // Blue
+                                eventClass = 'deployment-event';
+                            } else {
+                                // Orange
+                                eventClass = 'deployment-new-event';
+                            }
+                        }
+
                         eventsEl.createEl('div', {
                             text: `${deployment.customerName}`,
                             cls: `event ${eventClass}`
@@ -1524,6 +1571,7 @@ class CalendarModal extends Modal {
             }
         }
     }
+
 
 
 
@@ -1848,6 +1896,10 @@ style.textContent = `
 }
 
 /* Stil für Einsatz-Ereignis */
+.deployment-new-event {
+    background-color: orange;
+}
+
 .deployment-event {
     background-color: #3D90A1;
 }
