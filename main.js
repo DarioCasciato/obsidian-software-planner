@@ -1,5 +1,6 @@
-const { Plugin, PluginSettingTab, Setting, Notice, Modal, MarkdownRenderer, TFile } = require('obsidian');
+// #region Imports and Constants
 
+const { Plugin, PluginSettingTab, Setting, Notice, Modal, MarkdownRenderer, TFile } = require('obsidian');
 const { remote } = require('electron');
 const path = require('path');
 const fs = require('fs');
@@ -14,91 +15,179 @@ const DEFAULT_SETTINGS = {
     deploymentTemplatePath: '',
     remoteTaskTemplatePath: '',
     xmlProgramPath: '',
-    deploymentTypesPath: '' // NEW: Path for deployment types
+    deploymentTypesPath: ''
 };
 
-// Utility function to copy folders
-async function copyFolder(src, dest) {
-    if (!fs.existsSync(dest)) {
+// #endregion
+
+// #region Utility Functions
+
+async function copyFolder(src, dest)
+{
+    if (!fs.existsSync(dest))
+    {
         fs.mkdirSync(dest, { recursive: true });
     }
 
     const entries = fs.readdirSync(src, { withFileTypes: true });
 
-    for (let entry of entries) {
+    for (let entry of entries)
+    {
         const srcPath = path.join(src, entry.name);
         const destPath = path.join(dest, entry.name);
 
-        if (entry.isDirectory()) {
+        if (entry.isDirectory())
+        {
             await copyFolder(srcPath, destPath);
-        } else {
+        }
+        else
+        {
             fs.copyFileSync(srcPath, destPath);
         }
     }
 }
 
-// Utility function to get existing folders
-function getExistingFolders(basePath) {
+function getExistingFolders(basePath)
+{
     if (!fs.existsSync(basePath)) return [];
     return fs.readdirSync(basePath, { withFileTypes: true })
         .filter(entry => entry.isDirectory())
         .map(entry => entry.name);
 }
 
-// Utility function to get files (non-directory) from a folder
-function getFilesInFolder(basePath) { // NEW: To get deployment type files
+function getFilesInFolder(basePath)
+{
     if (!fs.existsSync(basePath)) return [];
     return fs.readdirSync(basePath, { withFileTypes: true })
         .filter(entry => entry.isFile())
         .map(entry => entry.name);
 }
 
-// Utility function to create and update the task file
-async function createUpdatedTaskFile(templatePath, destinationPath, customerName) {
+async function createUpdatedTaskFile(templatePath, destinationPath, customerName)
+{
     let taskContent = await fs.promises.readFile(templatePath, 'utf8');
     taskContent = taskContent.replace('**Kunde**:', `**Kunde**: ${customerName}`);
     await fs.promises.writeFile(destinationPath, taskContent, 'utf8');
 }
 
-// Settings tab
-class SoftwarePlannerSettingTab extends PluginSettingTab {
-    constructor(app, plugin) {
+// #endregion
+
+// #region Helper Methods for Einsatz Parsing
+
+/**
+ * Reads and parses "Einsatz.md" to determine completion status, pre-check status, and the short description (Kurzbeschrieb).
+ */
+function parseEinsatzFile(einsatzMdPath)
+{
+    let completed = false;
+    let preCheckDone = false;
+    let kurzbeschrieb = "Unbekannt";
+
+    try
+    {
+        const einsatzContent = fs.readFileSync(einsatzMdPath, 'utf8');
+        completed = einsatzContent.includes('- [x] **Auftrag abgeschlossen**');
+
+        // Extract Kurzbeschrieb (Deployment Type Title)
+        const titleMatch = einsatzContent.match(/### Kurzbeschrieb Auftrag[\s\S]*?#####\s*(.*?)\r?\n/);
+        if (titleMatch && titleMatch[1])
+        {
+            kurzbeschrieb = titleMatch[1].trim();
+        }
+
+        // If not completed, check the "Abklären" pre-check section
+        if (!completed)
+        {
+            preCheckDone = checkPreChecklist(einsatzContent);
+        }
+        else
+        {
+            // If completed, preCheckDone doesn't matter, but is true logically.
+            preCheckDone = true;
+        }
+    }
+    catch (error)
+    {
+        console.error(`Fehler beim Lesen von ${einsatzMdPath}: ${error.message}`);
+    }
+
+    return { completed, preCheckDone, kurzbeschrieb };
+}
+
+/**
+ * Checks the "Abklären" checklist in "Einsatz.md" content to see if pre-check is done.
+ */
+function checkPreChecklist(einsatzContent)
+{
+    const abklaerenSectionRegex = /#### Abklären([\s\S]*?)(?=####|$)/;
+    const abklaerenMatch = einsatzContent.match(abklaerenSectionRegex);
+
+    if (!abklaerenMatch)
+    {
+        // No "Abklären" section found, consider preCheckDone = true by default
+        return true;
+    }
+
+    const abklaerenContent = abklaerenMatch[1];
+    const tasks = abklaerenContent.match(/- \[[ x]\]/g);
+
+    if (!tasks || tasks.length === 0)
+    {
+        // "Abklären" found but no tasks listed, consider it done
+        return true;
+    }
+
+    // Check if all tasks are checked
+    return tasks.every(t => t.includes('- [x]'));
+}
+
+// #endregion
+
+// #region Settings Tab
+
+class SoftwarePlannerSettingTab extends PluginSettingTab
+{
+    constructor(app, plugin)
+    {
         super(app, plugin);
         this.plugin = plugin;
     }
 
-    display() {
+    display()
+    {
         const { containerEl } = this;
         containerEl.empty();
 
         containerEl.createEl('h2', { text: 'Software Planner Plugin Einstellungen' });
 
-        // Software Settings
+        // Software Einstellungen
         containerEl.createEl('h3', { text: 'Software Einstellungen' });
-
         this.addPathSetting(containerEl, 'Kunden Vorlagenpfad', 'customerTemplatePath');
         this.addPathSetting(containerEl, 'Kundeneinsatz Vorlagenpfad', 'deploymentTemplatePath');
         this.addPathSetting(containerEl, 'Kunden Zielverzeichnispfad', 'customerDestinationPath');
 
-        // NEW: Setting for Deployment Types directory
+        // Einsatztypen Verzeichnis
         new Setting(containerEl)
             .setName('Einsatztypen Verzeichnis')
             .setDesc('Verzeichnis mit Dateien für verschiedene Einsatz-Typen')
             .addText(text => text
                 .setPlaceholder('Pfad angeben')
                 .setValue(this.plugin.settings.deploymentTypesPath || '')
-                .onChange(async (value) => {
+                .onChange(async (value) =>
+                {
                     this.plugin.settings.deploymentTypesPath = value;
                     await this.plugin.saveSettings();
                 }))
             .addButton(button => button
                 .setButtonText('Durchsuchen')
                 .setCta()
-                .onClick(async () => {
+                .onClick(async () =>
+                {
                     const result = await remote.dialog.showOpenDialog({
                         properties: ['openDirectory']
                     });
-                    if (!result.canceled) {
+                    if (!result.canceled)
+                    {
                         const selectedPath = result.filePaths[0];
                         const vaultPath = this.app.vault.adapter.basePath;
                         const relativePath = path.relative(vaultPath, selectedPath);
@@ -109,113 +198,102 @@ class SoftwarePlannerSettingTab extends PluginSettingTab {
                     }
                 }));
 
-        // Remote Settings
+        // Remote Einstellungen
         containerEl.createEl('h3', { text: 'Remote Settings' });
-
         this.addPathSetting(containerEl, 'Remote Tag Vorlagenpfad', 'remoteDayTemplatePath');
         this.addPathSetting(containerEl, 'Remote Auftrag Vorlagenpfad', 'remoteTaskTemplatePath');
         this.addPathSetting(containerEl, 'Remote Tag Zielverzeichnis Pfad', 'remoteDayDestinationPath');
 
-        // XML Program Path
+        // XMLVisualizer Einstellungen
         containerEl.createEl('h3', { text: 'XMLVisualizer Einstellungen' });
-
         this.addPathSetting(containerEl, 'XMLVisualizer Pfad', 'xmlProgramPath');
     }
 
-    addPathSetting(containerEl, name, settingKey) {
+    addPathSetting(containerEl, name, settingKey)
+    {
         new Setting(containerEl)
             .setName(name)
             .setDesc(`Pfad zu ${name}`)
             .addText(text => text
                 .setPlaceholder('Pfad angeben')
                 .setValue(this.plugin.settings[settingKey] || '')
-                .onChange(async (value) => {
+                .onChange(async (value) =>
+                {
                     this.plugin.settings[settingKey] = value;
                     await this.plugin.saveSettings();
                 }))
             .addButton(button => button
                 .setButtonText('Durchsuchen')
                 .setCta()
-                .onClick(async () => {
+                .onClick(async () =>
+                {
                     const properties = name === 'XMLVisualizer Pfad' ? ['openFile'] : ['openDirectory'];
                     const result = await remote.dialog.showOpenDialog({
                         properties: properties
                     });
-                    if (!result.canceled) {
+                    if (!result.canceled)
+                    {
                         const selectedPath = result.filePaths[0];
                         const vaultPath = this.app.vault.adapter.basePath;
                         const relativePath = path.relative(vaultPath, selectedPath);
 
                         this.plugin.settings[settingKey] = relativePath;
                         await this.plugin.saveSettings();
-                        this.display(); // Refresh the settings to show updated path
+                        this.display();
                     }
                 }));
     }
 }
 
-// Main plugin class
-class SoftwarePlanner extends Plugin {
-    async onload() {
+// #endregion
+
+// #region Main Plugin Class
+
+class SoftwarePlanner extends Plugin
+{
+    async onload()
+    {
         console.log('Software Planner Plugin wird geladen');
 
-        // Load settings
         await this.loadSettings();
-
-        // Add settings tab
         this.addSettingTab(new SoftwarePlannerSettingTab(this.app, this));
-
-        // Register commands
         this.registerCommands();
-
-        // Create ribbon icons
         this.createRibbonIcons();
-
-        // Add XML file extension support
         this.addXMLFileExtension();
 
-        // Kalender-Befehl registrieren
         this.addCommand({
             id: 'open-calendar',
             name: 'Planner-Kalender öffnen',
             callback: () => this.openCalendar()
         });
 
-        // Kalender-Symbol zum Ribbon hinzufügen
         this.addRibbonIcon('calendar', 'Planner-Kalender öffnen', () => this.openCalendar());
 
-        // Initialize calendarModalInstance
         this.calendarModalInstance = null;
-
-        // Initialize Status Bar Button
         this.neuerAuftragButton = null;
 
-        // Listen to active file changes
         this.registerEvent(this.app.workspace.on('active-leaf-change', this.onActiveLeafChange.bind(this)));
     }
 
-    onunload() {
+    onunload()
+    {
         console.log('Software Planner Plugin wird entladen');
     }
 
-    async loadSettings() {
+    async loadSettings()
+    {
         this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
     }
 
-    async saveSettings() {
+    async saveSettings()
+    {
         await this.saveData(this.settings);
     }
 
-    async createNewRemoteDayPrompt() {
-        const dateStr = await this.promptSingleDate('Datum des Remote-Tags eingeben (YYYY-MM-DD)');
-        if (!dateStr) {
-            new Notice('Kein Datum eingegeben.');
-            return;
-        }
-        await this.createNewRemoteDay(dateStr);
-    }
+    // #region Command Registration
 
-    registerCommands() {
+    registerCommands()
+    {
         this.addCommand({
             id: 'create-new-customer',
             name: 'Neuer Kunde erstellen',
@@ -225,9 +303,11 @@ class SoftwarePlanner extends Plugin {
         this.addCommand({
             id: 'create-new-remote-day',
             name: 'Neuen Remote-Tag erstellen',
-            callback: async () => {
+            callback: async () =>
+            {
                 const dateStr = await this.promptSingleDate('Datum des Remote-Tags auswählen');
-                if (dateStr) {
+                if (dateStr)
+                {
                     await this.createNewRemoteDay(dateStr);
                 }
             }
@@ -258,12 +338,15 @@ class SoftwarePlanner extends Plugin {
         });
     }
 
-    createRibbonIcons() {
+    createRibbonIcons()
+    {
         this.addRibbonIcon('user-plus', 'Neuer Kunde', () => this.createNewCustomer());
         this.addRibbonIcon('log-out', 'Neuer Einsatz', () => this.createNewDeployment());
-        this.addRibbonIcon('screen-share', 'Neuer Remote-Tag', async () => {
+        this.addRibbonIcon('screen-share', 'Neuer Remote-Tag', async () =>
+        {
             const dateStr = await this.promptSingleDate('Datum des Remote-Tags auswählen');
-            if (dateStr) {
+            if (dateStr)
+            {
                 await this.createNewRemoteDay(dateStr);
             }
         });
@@ -273,19 +356,33 @@ class SoftwarePlanner extends Plugin {
         this.addRibbonIcon('calendar', 'Planner-Kalender öffnen', () => this.openCalendar());
     }
 
-    async openFile(filePath) {
+    // #endregion
+
+    // #region File Operations
+
+    async openFile(filePath)
+    {
         const filePathInVault = path.relative(this.app.vault.adapter.basePath, filePath).replace(/\\/g, '/');
         const file = this.app.vault.getAbstractFileByPath(filePathInVault);
 
-        if (file && file instanceof TFile) {
+        if (file && file instanceof TFile)
+        {
             await this.app.workspace.getLeaf().openFile(file);
-        } else {
+        }
+        else
+        {
             new Notice('Datei nicht gefunden.');
         }
     }
 
-    async createNewCustomer() {
-        if (!this.settings.customerTemplatePath || !this.settings.customerDestinationPath) {
+    // #endregion
+
+    // #region Customer and Deployment Creation
+
+    async createNewCustomer()
+    {
+        if (!this.settings.customerTemplatePath || !this.settings.customerDestinationPath)
+        {
             new Notice('Setze die Kunden Vorlage- und Zielpfäde in den Einstellungen.');
             return;
         }
@@ -293,181 +390,89 @@ class SoftwarePlanner extends Plugin {
         const customerName = await this.promptUser('Kundennamen eingeben');
         if (!customerName) return;
 
+        await this.createNewCustomerWithName(customerName);
+    }
+
+    async createNewCustomerWithName(customerName)
+    {
         const customerPath = path.join(this.app.vault.adapter.basePath, this.settings.customerDestinationPath, customerName);
         const templatePath = path.join(this.app.vault.adapter.basePath, this.settings.customerTemplatePath);
 
-        try {
+        try
+        {
             await copyFolder(templatePath, customerPath);
             new Notice(`Kundenordner erstellt: ${customerName}`);
-        } catch (error) {
+        }
+        catch (error)
+        {
             console.error(`Fehler beim Erstellen vom Kundenordner: ${error.message}`);
             new Notice(`Fehler beim Erstellen vom Kundenordner: ${error.message}`);
         }
     }
 
-    async createNewRemoteDay(dateStr) {
-        if (!this.settings.remoteDayDestinationPath) {
-            new Notice('Remote Tag Zielverzeichnis Pfad ist nicht gesetzt. Bitte überprüfen Sie die Einstellungen.');
-            return;
-        }
-
-        // Entfernt abschließende Slashes aus dem Zielpfad
-        const remoteDayDestinationPath = this.settings.remoteDayDestinationPath.replace(/\/+$/, '');
-        const remoteDayPath = path.join(this.app.vault.adapter.basePath, remoteDayDestinationPath, dateStr);
-        const templatePath = path.join(this.app.vault.adapter.basePath, this.settings.remoteDayTemplatePath);
-
-        try {
-            await copyFolder(templatePath, remoteDayPath);
-            new Notice(`Remote-Tag erstellt: ${dateStr}`);
-
-            // Öffne die Zeitplan.md Datei
-            const scheduleFilePath = path.join(remoteDayPath, 'Zeitplan.md');
-            await this.openFile(scheduleFilePath);
-
-            // Manuelles Aufrufen von onActiveLeafChange zur Sicherstellung der Aktualisierung
-            this.onActiveLeafChange();
-        } catch (error) {
-            console.error(`Fehler beim Erstellen des Remote-Tags: ${error.message}`);
-            new Notice(`Fehler beim Erstellen des Remote-Tags: ${error.message}`);
-        }
-    }
-
-    onActiveLeafChange() {
-        const activeFile = this.app.workspace.getActiveFile();
-        if (activeFile && this.isScheduleFile(activeFile)) {
-            const date = this.getDateFromScheduleFile(activeFile);
-            if (date) {
-                this.addNeuerAuftragButton(date);
-            } else {
-                console.error('Datum konnte aus dem aktiven Zeitplan nicht extrahiert werden.');
-                this.removeNeuerAuftragButton();
-            }
-        } else {
-            this.removeNeuerAuftragButton();
-        }
-    }
-
-    // NEW: Prompt the user to select a deployment type file
-    async promptDeploymentType() {
-        if (!this.settings.deploymentTypesPath) {
-            new Notice('Deployment-Typ-Verzeichnis ist nicht definiert. Bitte in den Einstellungen setzen.');
-            return null;
-        }
-
-        const typesBasePath = path.join(this.app.vault.adapter.basePath, this.settings.deploymentTypesPath);
-        if (!fs.existsSync(typesBasePath)) {
-            new Notice('Deployment-Typ-Verzeichnis existiert nicht.');
-            return null;
-        }
-
-        const files = getFilesInFolder(typesBasePath);
-        if (files.length === 0) {
-            new Notice('Keine Deployment-Typ-Dateien gefunden.');
-            return null;
-        }
-
-        // Show only file names without extension in the dropdown
-        const options = files.map(file => path.parse(file).name);
-
-        const chosen = await this.promptDropdown('Einsatztyp wählen', options);
-        if (!chosen) return null;
-
-        // Once chosen, read the content of the file
-        const chosenFile = files.find(f => path.parse(f).name === chosen);
-        if (!chosenFile) return null;
-
-        const chosenFilePath = path.join(typesBasePath, chosenFile);
-        const content = await fs.promises.readFile(chosenFilePath, 'utf8');
-
-        // The "title" = chosen (the file name without extension)
-        // The "checklist" = full content of the file
-        return { title: chosen, checklist: content };
-    }
-
-    async createNewDeployment() {
-        if (!this.settings.deploymentTemplatePath || !this.settings.customerDestinationPath) {
+    async createNewDeployment()
+    {
+        if (!this.settings.deploymentTemplatePath || !this.settings.customerDestinationPath)
+        {
             new Notice('Setze die Einsatzvorlage und den Kundenzielpfad in den Einstellungen.');
             return;
         }
 
         const customers = getExistingFolders(path.join(this.app.vault.adapter.basePath, this.settings.customerDestinationPath));
-
-        const customerName = await this.promptDropdown(
-            'Kunden wählen',
-            customers,
-            false,
-            null,
-            true, // allowNewCustomer
-            async (newCustomerName) => {
-                await this.createNewCustomerWithName(newCustomerName);
-            }
-        );
+        const customerName = await this.promptDropdown('Kunden wählen', customers, false, null, true, async (newCustomerName) =>
+        {
+            await this.createNewCustomerWithName(newCustomerName);
+        });
         if (!customerName) return;
 
         const deploymentDates = await this.promptDateRange('Startdatum des Einsatzes angeben (YYYY-MM-DD)');
         if (!deploymentDates) return;
 
-        // NEW: Prompt for deployment type
         const deploymentTypeData = await this.promptDeploymentType();
-        if (!deploymentTypeData) {
+        if (!deploymentTypeData)
+        {
             new Notice('Kein Einsatztyp gewählt.');
             return;
         }
 
-        const folderName = deploymentDates.endDate
-            ? `${deploymentDates.startDate} - ${deploymentDates.endDate}`
-            : deploymentDates.startDate;
-
-        const customerPath = path.join(this.app.vault.adapter.basePath, this.settings.customerDestinationPath, customerName, '1. Einsätze', folderName);
-        const templatePath = path.join(this.app.vault.adapter.basePath, this.settings.deploymentTemplatePath);
-
-        try {
-            await copyFolder(templatePath, customerPath);
-            await this.updateEinsatzMd(
-                path.join(customerPath, 'Einsatz.md'),
-                customerName,
-                deploymentDates.startDate,
-                deploymentTypeData.title,    // NEW
-                deploymentTypeData.checklist // NEW
-            );
-            new Notice(`Einsatz erstellt für ${customerName} vom ${folderName}`);
-        } catch (error) {
-            console.error(`Fehler beim Erstellen des Einsatzes: ${error.message}`);
-            new Notice(`Fehler beim Erstellen des Einsatzes: ${error.message}`);
-        }
+        await this.finishDeploymentCreation(customerName, deploymentDates, deploymentTypeData);
     }
 
-    // CHANGED: Added deployment type prompt to createNewDeploymentWithDate as well
-    async createNewDeploymentWithDate(deploymentDate) {
-        if (!this.settings.deploymentTemplatePath || !this.settings.customerDestinationPath) {
+    async createNewDeploymentWithDate(deploymentDate)
+    {
+        if (!this.settings.deploymentTemplatePath || !this.settings.customerDestinationPath)
+        {
             new Notice('Setze die Einsatzvorlage und den Kundenzielpfad in den Einstellungen.');
             return;
         }
 
         const customers = getExistingFolders(path.join(this.app.vault.adapter.basePath, this.settings.customerDestinationPath));
-
-        const customerName = await this.promptDropdown(
-            'Kunden wählen',
-            customers,
-            false,
-            null,
-            true, // allowNewCustomer
-            async (newCustomerName) => {
-                await this.createNewCustomerWithName(newCustomerName);
-            }
-        );
+        const customerName = await this.promptDropdown('Kunden wählen', customers, false, null, true, async (newCustomerName) =>
+        {
+            await this.createNewCustomerWithName(newCustomerName);
+        });
         if (!customerName) return;
 
         const deploymentDates = await this.promptDateRange('Startdatum des Einsatzes angeben (YYYY-MM-DD)', deploymentDate);
         if (!deploymentDates) return;
 
-        // NEW: Prompt for deployment type
         const deploymentTypeData = await this.promptDeploymentType();
-        if (!deploymentTypeData) {
+        if (!deploymentTypeData)
+        {
             new Notice('Kein Einsatztyp gewählt.');
             return;
         }
 
+        await this.finishDeploymentCreation(customerName, deploymentDates, deploymentTypeData);
+
+        if (this.calendarModalInstance)
+        {
+            this.calendarModalInstance.refreshCalendar();
+        }
+    }
+
+    async finishDeploymentCreation(customerName, deploymentDates, deploymentTypeData)
+    {
         const folderName = deploymentDates.endDate
             ? `${deploymentDates.startDate} - ${deploymentDates.endDate}`
             : deploymentDates.startDate;
@@ -481,28 +486,107 @@ class SoftwarePlanner extends Plugin {
         );
         const templatePath = path.join(this.app.vault.adapter.basePath, this.settings.deploymentTemplatePath);
 
-        try {
+        try
+        {
             await copyFolder(templatePath, customerPath);
             await this.updateEinsatzMd(
                 path.join(customerPath, 'Einsatz.md'),
                 customerName,
                 deploymentDates.startDate,
-                deploymentTypeData.title,    // NEW
-                deploymentTypeData.checklist // NEW
+                deploymentTypeData.title,
+                deploymentTypeData.checklist
             );
             new Notice(`Einsatz erstellt für ${customerName} vom ${folderName}`);
-        } catch (error) {
+        }
+        catch (error)
+        {
             console.error(`Fehler beim Erstellen des Einsatzes: ${error.message}`);
             new Notice(`Fehler beim Erstellen des Einsatzes: ${error.message}`);
         }
+    }
 
-        if (this.calendarModalInstance) {
+    // #endregion
+
+    // #region Remote Day and Task Creation
+
+    async createNewRemoteDayPrompt()
+    {
+        const dateStr = await this.promptSingleDate('Datum des Remote-Tags eingeben (YYYY-MM-DD)');
+        if (!dateStr)
+        {
+            new Notice('Kein Datum eingegeben.');
+            return;
+        }
+        await this.createNewRemoteDay(dateStr);
+    }
+
+    async createNewRemoteDay(dateStr)
+    {
+        if (!this.settings.remoteDayDestinationPath)
+        {
+            new Notice('Remote Tag Zielverzeichnis Pfad ist nicht gesetzt. Bitte überprüfen Sie die Einstellungen.');
+            return;
+        }
+
+        const remoteDayDestinationPath = this.settings.remoteDayDestinationPath.replace(/\/+$/, '');
+        const remoteDayPath = path.join(this.app.vault.adapter.basePath, remoteDayDestinationPath, dateStr);
+        const templatePath = path.join(this.app.vault.adapter.basePath, this.settings.remoteDayTemplatePath);
+
+        try
+        {
+            await copyFolder(templatePath, remoteDayPath);
+            new Notice(`Remote-Tag erstellt: ${dateStr}`);
+
+            const scheduleFilePath = path.join(remoteDayPath, 'Zeitplan.md');
+            await this.openFile(scheduleFilePath);
+
+            this.onActiveLeafChange();
+        }
+        catch (error)
+        {
+            console.error(`Fehler beim Erstellen des Remote-Tags: ${error.message}`);
+            new Notice(`Fehler beim Erstellen des Remote-Tags: ${error.message}`);
+        }
+    }
+
+    async createNewRemoteDayWithDate(remoteDay)
+    {
+        if (!this.settings.remoteDayTemplatePath || !this.settings.remoteDayDestinationPath)
+        {
+            new Notice('Setze die Remote-Tag Vorlage- und Zielpfäde in den Einstellungen.');
+            return;
+        }
+
+        const remoteDayPath = path.join(this.app.vault.adapter.basePath, this.settings.remoteDayDestinationPath, remoteDay);
+        const templatePath = path.join(this.app.vault.adapter.basePath, this.settings.remoteDayTemplatePath);
+
+        if (fs.existsSync(remoteDayPath))
+        {
+            new Notice(`Remote-Tag für ${remoteDay} existiert bereits.`);
+            return;
+        }
+
+        try
+        {
+            await copyFolder(templatePath, remoteDayPath);
+            new Notice(`Remote-Tag Ordner erstellt: ${remoteDay}`);
+        }
+        catch (error)
+        {
+            console.error(`Fehler beim Erstellen des Remote-Tag Ordners: ${error.message}`);
+            new Notice(`Fehler beim Erstellen des Remote-Tag Ordners: ${error.message}`);
+        }
+
+        if (this.calendarModalInstance)
+        {
             this.calendarModalInstance.refreshCalendar();
         }
     }
 
-    async createNewRemoteTask() {
-        if (!this.settings.remoteTaskTemplatePath || !this.settings.remoteDayDestinationPath) {
+    async createNewRemoteTask()
+    {
+        if (!this.settings.remoteTaskTemplatePath || !this.settings.remoteDayDestinationPath)
+        {
             new Notice('Setze die Remote-Auftrag Vorlage und den Remote-Tag Zielpfad in den Einstellungen.');
             return;
         }
@@ -520,23 +604,73 @@ class SoftwarePlanner extends Plugin {
         const taskFilePath = path.join(remoteTaskPath, 'Auftrag.md');
         const taskFileTemplatePath = path.join(templatePath, 'Auftrag.md');
 
-        try {
+        try
+        {
             await copyFolder(templatePath, remoteTaskPath);
             await this.addTaskToSchedule(schedulePath, taskName);
             await createUpdatedTaskFile(taskFileTemplatePath, taskFilePath, taskName);
             new Notice(`Remote Auftragsordner erstellt für ${taskName} am ${remoteDay}`);
-        } catch (error) {
+        }
+        catch (error)
+        {
             console.error(`Fehler beim Erstellen des Remote Auftrags: ${error.message}`);
             new Notice(`Fehler beim Erstellen des Remote Auftrags: ${error.message}`);
         }
     }
 
-    async archiveOldRemoteDays() {
+    async createNewRemoteTaskFromSchedule(date)
+    {
+        if (!date)
+        {
+            console.error('Kein gültiges Datum übergeben.');
+            new Notice('Kein gültiges Datum gefunden.');
+            return;
+        }
+
+        const taskName = await this.promptUser('Auftragsnamen eingeben');
+        if (!taskName)
+        {
+            new Notice('Kein Auftragsnamen eingegeben.');
+            return;
+        }
+
+        if (!this.settings.remoteDayDestinationPath)
+        {
+            new Notice('Remote Tag Zielverzeichnis Pfad ist nicht gesetzt. Bitte überprüfen Sie die Einstellungen.');
+            return;
+        }
+
+        const remoteTaskPath = path.join(this.app.vault.adapter.basePath, this.settings.remoteDayDestinationPath, date, taskName);
+        const templatePath = path.join(this.app.vault.adapter.basePath, this.settings.remoteTaskTemplatePath);
+        const schedulePath = path.join(this.app.vault.adapter.basePath, this.settings.remoteDayDestinationPath, date, 'Zeitplan.md');
+        const taskFilePath = path.join(remoteTaskPath, 'Auftrag.md');
+        const taskFileTemplatePath = path.join(templatePath, 'Auftrag.md');
+
+        try
+        {
+            await copyFolder(templatePath, remoteTaskPath);
+            await this.addTaskToSchedule(schedulePath, taskName);
+            await createUpdatedTaskFile(taskFileTemplatePath, taskFilePath, taskName);
+            new Notice(`Remote Auftragsordner erstellt für "${taskName}" am ${date}`);
+        }
+        catch (error)
+        {
+            console.error(`Fehler beim Erstellen des Remote Auftrags: ${error.message}`);
+            new Notice(`Fehler beim Erstellen des Remote Auftrags: ${error.message}`);
+        }
+    }
+
+    // #endregion
+
+    // #region Archiving and Checking
+
+    async archiveOldRemoteDays()
+    {
         const basePath = path.join(this.app.vault.adapter.basePath, this.settings.remoteDayDestinationPath);
         const archivePath = path.join(basePath, '_Archiv');
 
-        // Archiv-Ordner erstellen, falls er nicht existiert
-        if (!fs.existsSync(archivePath)) {
+        if (!fs.existsSync(archivePath))
+        {
             fs.mkdirSync(archivePath);
         }
 
@@ -544,12 +678,13 @@ class SoftwarePlanner extends Plugin {
         const oneWeekAgo = new Date();
         oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
 
-        for (let remoteDay of remoteDays) {
+        for (let remoteDay of remoteDays)
+        {
             const remoteDayDate = new Date(remoteDay);
-            if (!isNaN(remoteDayDate) && remoteDayDate < oneWeekAgo) {
+            if (!isNaN(remoteDayDate) && remoteDayDate < oneWeekAgo)
+            {
                 const sourcePath = path.join(basePath, remoteDay);
                 const destinationPath = path.join(archivePath, remoteDay);
-
                 fs.renameSync(sourcePath, destinationPath);
             }
         }
@@ -557,29 +692,30 @@ class SoftwarePlanner extends Plugin {
         new Notice('Archivierung abgeschlossen.');
     }
 
-    async checkRemoteTasks() {
+    async checkRemoteTasks()
+    {
         const basePath = path.join(this.app.vault.adapter.basePath, this.settings.remoteDayDestinationPath);
         const archivePath = path.join(basePath, '_Archiv');
         let reportContent = '\n';
 
-        // Alle Remote-Tage im Hauptordner und im Archiv-Ordner durchsuchen
         const remoteDays = getExistingFolders(basePath).concat(getExistingFolders(archivePath));
 
-        for (let remoteDay of remoteDays) {
-            // Pfad zum Zeitplan des Remote-Tages erstellen
+        for (let remoteDay of remoteDays)
+        {
             const schedulePathMain = path.join(basePath, remoteDay, 'Zeitplan.md');
             const schedulePathArchive = path.join(archivePath, remoteDay, 'Zeitplan.md');
             const schedulePath = fs.existsSync(schedulePathMain) ? schedulePathMain : schedulePathArchive;
 
-            if (fs.existsSync(schedulePath)) {
+            if (fs.existsSync(schedulePath))
+            {
                 const scheduleContent = await fs.promises.readFile(schedulePath, 'utf8');
-
                 const tasksInProgress = this.extractInProgressTasks(scheduleContent);
-                if (tasksInProgress.length > 0) {
-                    // Erstelle einen Link zum Zeitplan des entsprechenden Remote-Tages
+                if (tasksInProgress.length > 0)
+                {
                     const linkPrefix = schedulePath.includes('_Archiv') ? `_Archiv/${remoteDay}` : remoteDay;
                     reportContent += `## [[${linkPrefix}/Zeitplan|${remoteDay}]]\n\n`;
-                    tasksInProgress.forEach(task => {
+                    tasksInProgress.forEach(task =>
+                    {
                         reportContent += `${task}\n`;
                     });
                     reportContent += '\n';
@@ -588,25 +724,26 @@ class SoftwarePlanner extends Plugin {
         }
 
         const reportFilePath = path.join(basePath, 'Nicht abgeschlossene Aufträge.md');
-        // Berichterstellung und Überschreiben der Datei, wenn sie existiert
         await fs.promises.writeFile(reportFilePath, reportContent, 'utf8');
         new Notice('Überprüfung abgeschlossen. Bericht erstellt.');
     }
 
-    extractInProgressTasks(scheduleContent) {
+    extractInProgressTasks(scheduleContent)
+    {
         const ignoredSections = ['Done', 'Abgebrochen'];
         let inProgressTasks = [];
-
         const sections = scheduleContent.split('##');
 
-        sections.forEach(section => {
+        sections.forEach(section =>
+        {
             let sectionHeader = section.split('\n')[0].trim();
-
-            // Prüfen, ob der Abschnitt ignoriert werden soll
-            if (!ignoredSections.some(ignored => sectionHeader.includes(ignored))) {
+            if (!ignoredSections.some(ignored => sectionHeader.includes(ignored)))
+            {
                 const lines = section.split('\n');
-                for (let line of lines) {
-                    if (line.includes('- [ ]')) {
+                for (let line of lines)
+                {
+                    if (line.includes('- [ ]'))
+                    {
                         inProgressTasks.push(line.trim());
                     }
                 }
@@ -616,76 +753,101 @@ class SoftwarePlanner extends Plugin {
         return inProgressTasks;
     }
 
-    // CHANGED: Now we accept title and checklist to replace placeholders
-    async updateEinsatzMd(einsatzFilePath, customerName, deploymentDate, deploymentTitle = '', deploymentChecklist = '') {
-        try {
-            let content = await fs.promises.readFile(einsatzFilePath, 'utf8');
+    // #endregion
 
-            // Kunde und Datum in den Einsatz.md-Inhalt einfügen
+    // #region Update Einsatz File
+
+    async updateEinsatzMd(einsatzFilePath, customerName, deploymentDate, deploymentTitle = '', deploymentChecklist = '')
+    {
+        try
+        {
+            let content = await fs.promises.readFile(einsatzFilePath, 'utf8');
             content = content.replace('**Kunde**:', `**Kunde**: ${customerName}`);
             content = content.replace('**Datum**:', `**Datum**: ${deploymentDate}`);
-
-            // NEW: Insert the deployment type title and checklist
             content = content.replace('[Title]', deploymentTitle);
             content = content.replace('[Checklist]', deploymentChecklist);
 
             await fs.promises.writeFile(einsatzFilePath, content, 'utf8');
-        } catch (error) {
+        }
+        catch (error)
+        {
             console.error(`Fehler beim Aktualisieren der Einsatz.md: ${error.message}`);
             new Notice(`Fehler beim Aktualisieren der Einsatz.md: ${error.message}`);
         }
     }
 
-    async promptUser(promptText) {
-        return new Promise((resolve) => {
+    // #endregion
+
+    // #region Prompts
+
+    async promptUser(promptText)
+    {
+        return new Promise((resolve) =>
+        {
             const modal = new PromptModal(this.app, promptText, resolve);
             modal.open();
         });
     }
 
-    async promptSingleDate(promptText) {
-        return new Promise((resolve) => {
+    async promptSingleDate(promptText)
+    {
+        return new Promise((resolve) =>
+        {
             const modal = new SingleDatePromptModal(this.app, promptText, resolve);
             modal.open();
         });
     }
 
-    async promptDateRange(promptText, defaultStartDate = null, defaultMultiDay = false) {
-        return new Promise((resolve) => {
+    async promptDateRange(promptText, defaultStartDate = null, defaultMultiDay = false)
+    {
+        return new Promise((resolve) =>
+        {
             const modal = new DateRangePromptModal(this.app, promptText, resolve, defaultStartDate, defaultMultiDay);
             modal.open();
         });
     }
 
-    async promptDropdown(promptText, options, showTodayButton = false, validateTodayCallback = null, allowNewCustomer = false, createNewCustomerCallback = null) {
-        return new Promise((resolve) => {
+    async promptDropdown(promptText, options, showTodayButton = false, validateTodayCallback = null, allowNewCustomer = false, createNewCustomerCallback = null)
+    {
+        return new Promise((resolve) =>
+        {
             const modal = new DropdownModal(this.app, promptText, options, resolve, showTodayButton, validateTodayCallback, allowNewCustomer, createNewCustomerCallback);
             modal.open();
         });
     }
 
-    async promptConfirm(promptText) {
-        return new Promise((resolve) => {
+    async promptConfirm(promptText)
+    {
+        return new Promise((resolve) =>
+        {
             const modal = new ConfirmPromptModal(this.app, promptText, resolve);
             modal.open();
         });
     }
 
-    addXMLFileExtension() {
-        this.registerExtensions(['xml'], 'markdown');
+    // #endregion
 
+    // #region XML File Handling
+
+    addXMLFileExtension()
+    {
+        this.registerExtensions(['xml'], 'markdown');
         this.registerEvent(
-            this.app.workspace.on('file-open', (file) => {
-                if (file && file.extension === 'xml') {
+            this.app.workspace.on('file-open', (file) =>
+            {
+                if (file && file.extension === 'xml')
+                {
                     this.showXMLConfirmDialog(file);
                 }
             })
         );
     }
 
-    showXMLConfirmDialog(file) {
+    showXMLConfirmDialog(file)
+    {
         const xmlProgramPath = this.settings.xmlProgramPath;
-        if (!xmlProgramPath) {
+        if (!xmlProgramPath)
+        {
             new Notice('Kein XMLVisualizer Programm hinterlegt. Überprüfe die Einstellungen.');
             return;
         }
@@ -693,13 +855,17 @@ class SoftwarePlanner extends Plugin {
         const filePath = path.join(this.app.vault.adapter.basePath, file.path);
         const activeLeaf = this.app.workspace.activeLeaf;
 
-        const modal = new ConfirmModal(this.app, 'XML öffnen im XML Visualizer', () => {
-            if (activeLeaf && activeLeaf.view.file && activeLeaf.view.file.path === file.path) {
+        const modal = new ConfirmModal(this.app, 'XML öffnen im XML Visualizer', () =>
+        {
+            if (activeLeaf && activeLeaf.view.file && activeLeaf.view.file.path === file.path)
+            {
                 activeLeaf.detach();
             }
 
-            exec(`"${xmlProgramPath}" "${filePath}"`, (error) => {
-                if (error) {
+            exec(`"${xmlProgramPath}" "${filePath}"`, (error) =>
+            {
+                if (error)
+                {
                     console.error(`Fehler beim Öffnen des XML-Files: ${error.message}`);
                     new Notice(`Fehler beim Öffnen des XML-Files: ${error.message}`);
                 }
@@ -708,41 +874,52 @@ class SoftwarePlanner extends Plugin {
         modal.open();
     }
 
-    openCalendar() {
+    // #endregion
+
+    // #region Calendar and Day Info
+
+    openCalendar()
+    {
         this.calendarModalInstance = new CalendarModal(this.app, this);
         this.calendarModalInstance.open();
     }
 
-    getDeploymentDates() {
+    getDeploymentDates()
+    {
         const customerBasePath = path.join(this.app.vault.adapter.basePath, this.settings.customerDestinationPath);
         const customers = getExistingFolders(customerBasePath);
 
         let deploymentDates = {};
-        for (const customer of customers) {
+        for (const customer of customers)
+        {
             const deploymentsPath = path.join(customerBasePath, customer, '1. Einsätze');
-            if (!fs.existsSync(deploymentsPath)) {
+            if (!fs.existsSync(deploymentsPath))
+            {
                 continue;
             }
             const deployments = getExistingFolders(deploymentsPath);
 
-            for (const deployment of deployments) {
+            for (const deployment of deployments)
+            {
                 const dateRangeRegex = /^(\d{4}-\d{2}-\d{2})(?:\s*-\s*(\d{4}-\d{2}-\d{2}))?$/;
                 const match = deployment.match(dateRangeRegex);
 
-                if (match) {
+                if (match)
+                {
                     const startDateStr = match[1];
-                    const endDateStr = match[2] || startDateStr; // single-day if no end date
+                    const endDateStr = match[2] || startDateStr;
                     const startDate = new Date(startDateStr);
                     const endDate = new Date(endDateStr);
                     const isSingleDay = startDateStr === endDateStr;
 
                     let currentDate = new Date(startDate);
-                    while (currentDate <= endDate) {
+                    while (currentDate <= endDate)
+                    {
                         const currentDayOfWeek = currentDate.getDay();
-                        if (isSingleDay || (currentDayOfWeek !== 0 && currentDayOfWeek !== 6)) {
+                        if (isSingleDay || (currentDayOfWeek !== 0 && currentDayOfWeek !== 6))
+                        {
                             const dateStr = currentDate.toISOString().split('T')[0];
 
-                            // Pfad zur Einsatz.md
                             const einsatzMdPath = path.join(
                                 this.app.vault.adapter.basePath,
                                 this.settings.customerDestinationPath,
@@ -752,50 +929,10 @@ class SoftwarePlanner extends Plugin {
                                 'Einsatz.md'
                             );
 
-                            let completed = false;
-                            let preCheckDone = false;
-                            let kurzbeschrieb = "Unbekannt"; // Default if not found
+                            const { completed, preCheckDone, kurzbeschrieb } = parseEinsatzFile(einsatzMdPath);
 
-                            try {
-                                const einsatzContent = fs.readFileSync(einsatzMdPath, 'utf8');
-                                // Check if completed (green)
-                                completed = einsatzContent.includes('- [x] **Auftrag abgeschlossen**');
-
-                                // Extract Kurzbeschrieb from "Kurzbeschrieb Auftrag" section
-                                // We look for a pattern:
-                                // ### Kurzbeschrieb Auftrag
-                                //
-                                // ##### SomeDeploymentType
-                                const titleMatch = einsatzContent.match(/### Kurzbeschrieb Auftrag[\s\S]*?#####\s*(.*?)\r?\n/);
-                                if (titleMatch && titleMatch[1]) {
-                                    kurzbeschrieb = titleMatch[1].trim();
-                                }
-
-                                if (!completed) {
-                                    // Check for "Abklären" section
-                                    const abklaerenSectionRegex = /#### Abklären([\s\S]*?)(?=####|$)/;
-                                    const abklaerenMatch = einsatzContent.match(abklaerenSectionRegex);
-
-                                    if (abklaerenMatch) {
-                                        const abklaerenContent = abklaerenMatch[1];
-                                        const tasks = abklaerenContent.match(/- \[[ x]\]/g);
-                                        if (tasks && tasks.length > 0) {
-                                            const allChecked = tasks.every(t => t.includes('- [x]'));
-                                            preCheckDone = allChecked;
-                                        } else {
-                                            preCheckDone = true;
-                                        }
-                                    } else {
-                                        // No "Abklären" section found, preCheckDone = true
-                                        preCheckDone = true;
-                                    }
-                                }
-
-                            } catch (error) {
-                                console.error(`Fehler beim Lesen von ${einsatzMdPath}: ${error.message}`);
-                            }
-
-                            if (!deploymentDates[dateStr]) {
+                            if (!deploymentDates[dateStr])
+                            {
                                 deploymentDates[dateStr] = [];
                             }
 
@@ -803,8 +940,8 @@ class SoftwarePlanner extends Plugin {
                                 customerName: customer,
                                 folderName: deployment,
                                 completed: completed,
-                                preCheckDone: completed ? true : preCheckDone,
-                                kurzbeschrieb: kurzbeschrieb // Store the extracted type here
+                                preCheckDone: preCheckDone,
+                                kurzbeschrieb: kurzbeschrieb
                             });
                         }
 
@@ -816,152 +953,151 @@ class SoftwarePlanner extends Plugin {
         return deploymentDates;
     }
 
-
-    getRemoteDates() {
+    getRemoteDates()
+    {
         const remoteBasePath = path.join(this.app.vault.adapter.basePath, this.settings.remoteDayDestinationPath);
         const archivePath = path.join(remoteBasePath, '_Archiv');
 
         let remoteDays = [];
 
-        // Remote-Tage aus dem Hauptordner sammeln
-        if (fs.existsSync(remoteBasePath)) {
+        if (fs.existsSync(remoteBasePath))
+        {
             remoteDays = remoteDays.concat(getExistingFolders(remoteBasePath));
         }
 
-        // Remote-Tage aus dem Archivordner sammeln
-        if (fs.existsSync(archivePath)) {
+        if (fs.existsSync(archivePath))
+        {
             remoteDays = remoteDays.concat(getExistingFolders(archivePath));
         }
 
         let remoteDates = {};
-        for (const day of remoteDays) {
-            if (day.match(/^\d{4}-\d{2}-\d{2}$/)) {
+        for (const day of remoteDays)
+        {
+            if (day.match(/^\d{4}-\d{2}-\d{2}$/))
+            {
                 remoteDates[day] = true;
             }
         }
         return remoteDates;
     }
 
-    async createNewRemoteDayWithDate(remoteDay) {
-        if (!this.settings.remoteDayTemplatePath || !this.settings.remoteDayDestinationPath) {
-            new Notice('Setze die Remote-Tag Vorlage- und Zielpfäde in den Einstellungen.');
-            return;
-        }
+    // #endregion
 
-        const remoteDayPath = path.join(this.app.vault.adapter.basePath, this.settings.remoteDayDestinationPath, remoteDay);
-        const templatePath = path.join(this.app.vault.adapter.basePath, this.settings.remoteDayTemplatePath);
+    // #region Schedule File Recognition
 
-        // Prüfen, ob der Remote-Tag bereits existiert
-        if (fs.existsSync(remoteDayPath)) {
-            new Notice(`Remote-Tag für ${remoteDay} existiert bereits.`);
-            return;
-        }
-
-        try {
-            await copyFolder(templatePath, remoteDayPath);
-            new Notice(`Remote-Tag Ordner erstellt: ${remoteDay}`);
-        } catch (error) {
-            console.error(`Fehler beim Erstellen des Remote-Tag Ordners: ${error.message}`);
-            new Notice(`Fehler beim Erstellen des Remote-Tag Ordners: ${error.message}`);
-        }
-
-        if (this.calendarModalInstance) {
-            this.calendarModalInstance.refreshCalendar();
-        }
-    }
-
-    openCreateModal(dateStr) {
-        const modal = new ChooseActionModal(this.app, dateStr, this);
-        modal.open();
-    }
-
-    async openDeploymentFile(deployment) {
-        const baseVaultPath = this.app.vault.adapter.basePath;
-        const deploymentFolderPath = path.join(
-            baseVaultPath,
-            this.settings.customerDestinationPath,
-            deployment.customerName,
-            '1. Einsätze',
-            deployment.folderName
-        );
-
-        const deploymentFilePath = path.join(deploymentFolderPath, 'Einsatz.md');
-
-        if (!fs.existsSync(deploymentFilePath)) {
-            new Notice('Einsatz.md existiert nicht.');
-            return;
-        }
-
-        const filePathInVault = path.relative(baseVaultPath, deploymentFilePath).replace(/\\/g, '/');
-        const file = this.app.vault.getAbstractFileByPath(filePathInVault);
-
-        if (file && file instanceof TFile) {
-            await this.app.workspace.getLeaf().openFile(file);
-
-            if (this.calendarModalInstance) {
-                this.calendarModalInstance.close();
-                this.calendarModalInstance = null;
+    onActiveLeafChange()
+    {
+        const activeFile = this.app.workspace.getActiveFile();
+        if (activeFile && this.isScheduleFile(activeFile))
+        {
+            const date = this.getDateFromScheduleFile(activeFile);
+            if (date)
+            {
+                this.addNewTaskButton(date);
             }
-        } else {
-            new Notice('Einsatz.md nicht gefunden.');
-        }
-    }
-
-    async openRemoteSchedule(dateStr) {
-        const baseVaultPath = this.app.vault.adapter.basePath;
-        const remoteDayBasePath = path.join(baseVaultPath, this.settings.remoteDayDestinationPath);
-
-        let remoteDayPath = path.join(remoteDayBasePath, dateStr);
-        let scheduleFilePath = path.join(remoteDayPath, 'Zeitplan.md');
-
-        if (!fs.existsSync(scheduleFilePath)) {
-            remoteDayPath = path.join(remoteDayBasePath, '_Archiv', dateStr);
-            scheduleFilePath = path.join(remoteDayPath, 'Zeitplan.md');
-        }
-
-        if (!fs.existsSync(scheduleFilePath)) {
-            new Notice('Zeitplan.md existiert nicht.');
-            return;
-        }
-
-        const filePathInVault = path.relative(baseVaultPath, scheduleFilePath).replace(/\\/g, '/');
-        const file = this.app.vault.getAbstractFileByPath(filePathInVault);
-
-        if (file && file instanceof TFile) {
-            await this.app.workspace.getLeaf().openFile(file);
-
-            if (this.calendarModalInstance) {
-                this.calendarModalInstance.close();
-                this.calendarModalInstance = null;
+            else
+            {
+                console.error('Datum konnte aus dem aktiven Zeitplan nicht extrahiert werden.');
+                this.removeNewTaskButton();
             }
-        } else {
-            new Notice('Zeitplan.md nicht gefunden.');
+        }
+        else
+        {
+            this.removeNewTaskButton();
         }
     }
 
-    async createNewCustomerWithName(customerName) {
-        if (!this.settings.customerTemplatePath || !this.settings.customerDestinationPath) {
-            new Notice('Setze die Kunden Vorlage- und Zielpfäde in den Einstellungen.');
-            return;
+    isScheduleFile(file)
+    {
+        const remoteDayPath = this.settings.remoteDayDestinationPath.replace(/\\/g, '/');
+        const escapedPath = remoteDayPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const regex = new RegExp(`^${escapedPath}/\\d{4}-\\d{2}-\\d{2}/Zeitplan\\.md$`);
+        return regex.test(file.path);
+    }
+
+    getDateFromScheduleFile(file)
+    {
+        const parts = file.path.split('/');
+        if (parts.length < 3)
+        {
+            console.error('Ungültiger Pfad für Zeitplan.md:', file.path);
+            return null;
         }
+        const remoteDayFolder = parts[parts.length - 2];
+        return remoteDayFolder;
+    }
 
-        const customerPath = path.join(this.app.vault.adapter.basePath, this.settings.customerDestinationPath, customerName);
-        const templatePath = path.join(this.app.vault.adapter.basePath, this.settings.customerTemplatePath);
+    // #endregion
 
-        try {
-            await copyFolder(templatePath, customerPath);
-            new Notice(`Kundenordner erstellt: ${customerName}`);
-        } catch (error) {
-            console.error(`Fehler beim Erstellen vom Kundenordner: ${error.message}`);
-            new Notice(`Fehler beim Erstellen vom Kundenordner: ${error.message}`);
+    // #region UI Helpers
+
+    addNewTaskButton(date)
+    {
+        this.removeNewTaskButton();
+
+        this.neuerAuftragButton = this.addStatusBarItem('statusbar-right');
+        this.neuerAuftragButton.setText('Neuer Auftrag');
+        this.neuerAuftragButton.setAttr('aria-label', 'Neuen Auftrag erstellen');
+        this.neuerAuftragButton.addClass('neuer-auftrag-statusbar-button');
+
+        this.neuerAuftragButton.addEventListener('click', () =>
+        {
+            this.createNewRemoteTaskFromSchedule(date);
+        });
+    }
+
+    removeNewTaskButton()
+    {
+        if (this.neuerAuftragButton)
+        {
+            this.neuerAuftragButton.remove();
+            this.neuerAuftragButton = null;
         }
     }
 
-    async addTaskToSchedule(schedulePath, taskName) {
+    async promptDeploymentType()
+    {
+        if (!this.settings.deploymentTypesPath)
+        {
+            new Notice('Deployment-Typ-Verzeichnis ist nicht definiert. Bitte in den Einstellungen setzen.');
+            return null;
+        }
+
+        const typesBasePath = path.join(this.app.vault.adapter.basePath, this.settings.deploymentTypesPath);
+        if (!fs.existsSync(typesBasePath))
+        {
+            new Notice('Deployment-Typ-Verzeichnis existiert nicht.');
+            return null;
+        }
+
+        const files = getFilesInFolder(typesBasePath);
+        if (files.length === 0)
+        {
+            new Notice('Keine Deployment-Typ-Dateien gefunden.');
+            return null;
+        }
+
+        const options = files.map(file => path.parse(file).name);
+        const chosen = await this.promptDropdown('Einsatztyp wählen', options);
+        if (!chosen) return null;
+
+        const chosenFile = files.find(f => path.parse(f).name === chosen);
+        if (!chosenFile) return null;
+
+        const chosenFilePath = path.join(typesBasePath, chosenFile);
+        const content = await fs.promises.readFile(chosenFilePath, 'utf8');
+
+        return { title: chosen, checklist: content };
+    }
+
+    async addTaskToSchedule(schedulePath, taskName)
+    {
         let scheduleContent = await fs.promises.readFile(schedulePath, 'utf8');
         const taskSection = '## Aufträge\n\n';
         const insertIndex = scheduleContent.indexOf(taskSection) + taskSection.length;
-        if (insertIndex === -1) {
+
+        if (insertIndex === -1)
+        {
             throw new Error('Aufgabenabschnitt nicht in Zeitplan gefunden');
         }
 
@@ -977,129 +1113,73 @@ class SoftwarePlanner extends Plugin {
         await fs.promises.writeFile(schedulePath, scheduleContent, 'utf8');
     }
 
-    async createNewRemoteTaskFromSchedule(date) {
-        if (!date) {
-            console.error('Kein gültiges Datum übergeben.');
-            new Notice('Kein gültiges Datum gefunden.');
-            return;
-        }
-
-        const taskName = await this.promptUser('Auftragsnamen eingeben');
-        if (!taskName) {
-            new Notice('Kein Auftragsnamen eingegeben.');
-            return;
-        }
-
-        if (!this.settings.remoteDayDestinationPath) {
-            new Notice('Remote Tag Zielverzeichnis Pfad ist nicht gesetzt. Bitte überprüfen Sie die Einstellungen.');
-            return;
-        }
-
-        const remoteTaskPath = path.join(this.app.vault.adapter.basePath, this.settings.remoteDayDestinationPath, date, taskName);
-        const templatePath = path.join(this.app.vault.adapter.basePath, this.settings.remoteTaskTemplatePath);
-        const schedulePath = path.join(this.app.vault.adapter.basePath, this.settings.remoteDayDestinationPath, date, 'Zeitplan.md');
-        const taskFilePath = path.join(remoteTaskPath, 'Auftrag.md');
-        const taskFileTemplatePath = path.join(templatePath, 'Auftrag.md');
-
-        try {
-            await copyFolder(templatePath, remoteTaskPath);
-            await this.addTaskToSchedule(schedulePath, taskName);
-            await createUpdatedTaskFile(taskFileTemplatePath, taskFilePath, taskName);
-            new Notice(`Remote Auftragsordner erstellt für "${taskName}" am ${date}`);
-        } catch (error) {
-            console.error(`Fehler beim Erstellen des Remote Auftrags: ${error.message}`);
-            new Notice(`Fehler beim Erstellen des Remote Auftrags: ${error.message}`);
-        }
-    }
-
-    isScheduleFile(file) {
-        const remoteDayPath = this.settings.remoteDayDestinationPath.replace(/\\/g, '/');
-        const escapedPath = remoteDayPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        const regex = new RegExp(`^${escapedPath}/\\d{4}-\\d{2}-\\d{2}/Zeitplan\\.md$`);
-        return regex.test(file.path);
-    }
-
-    getDateFromScheduleFile(file) {
-        const parts = file.path.split('/');
-        if (parts.length < 3) {
-            console.error('Ungültiger Pfad für Zeitplan.md:', file.path);
-            return null;
-        }
-        const remoteDayFolder = parts[parts.length - 2];
-        return remoteDayFolder;
-    }
-
-    addNeuerAuftragButton(date) {
-        this.removeNeuerAuftragButton();
-
-        this.neuerAuftragButton = this.addStatusBarItem('statusbar-right');
-        this.neuerAuftragButton.setText('Neuer Auftrag');
-        this.neuerAuftragButton.setAttr('aria-label', 'Neuen Auftrag erstellen');
-        this.neuerAuftragButton.addClass('neuer-auftrag-statusbar-button');
-
-        this.neuerAuftragButton.addEventListener('click', () => {
-            this.createNewRemoteTaskFromSchedule(date);
-        });
-    }
-
-    removeNeuerAuftragButton() {
-        if (this.neuerAuftragButton) {
-            this.neuerAuftragButton.remove();
-            this.neuerAuftragButton = null;
-        }
-    }
+    // #endregion
 }
 
-// PromptModal class
-class PromptModal extends Modal {
-    constructor(app, promptText, callback) {
+// #endregion
+
+// #region Modals
+
+class PromptModal extends Modal
+{
+    constructor(app, promptText, callback)
+    {
         super(app);
         this.promptText = promptText;
         this.callback = callback;
     }
 
-    onOpen() {
+    onOpen()
+    {
         const { contentEl } = this;
         contentEl.createEl('h2', { text: this.promptText });
 
         const inputEl = contentEl.createEl('input', { type: 'text' });
         inputEl.focus();
 
-        inputEl.addEventListener('keydown', (event) => {
-            if (event.key === 'Enter') {
+        inputEl.addEventListener('keydown', (event) =>
+        {
+            if (event.key === 'Enter')
+            {
                 this.callback(inputEl.value);
                 this.close();
             }
         });
 
         const buttonEl = contentEl.createEl('button', { text: 'OK' });
-        buttonEl.addEventListener('click', () => {
+        buttonEl.addEventListener('click', () =>
+        {
             this.callback(inputEl.value);
             this.close();
         });
     }
 
-    onClose() {
+    onClose()
+    {
         const { contentEl } = this;
         contentEl.empty();
     }
 }
 
-class SingleDatePromptModal extends Modal {
-    constructor(app, promptText, callback) {
+class SingleDatePromptModal extends Modal
+{
+    constructor(app, promptText, callback)
+    {
         super(app);
         this.promptText = promptText;
         this.callback = callback;
     }
 
-    onOpen() {
+    onOpen()
+    {
         const { contentEl } = this;
         contentEl.createEl('h2', { text: this.promptText });
 
         const containerEl = contentEl.createEl('div', { cls: 'date-container' });
 
         const todayButtonEl = containerEl.createEl('button', { text: 'Heute', cls: 'date-button' });
-        todayButtonEl.addEventListener('click', () => {
+        todayButtonEl.addEventListener('click', () =>
+        {
             const today = new Date().toISOString().split('T')[0];
             inputEl.value = today;
             this.callback(today);
@@ -1109,8 +1189,10 @@ class SingleDatePromptModal extends Modal {
         const inputEl = containerEl.createEl('input', { type: 'date', cls: 'date-input' });
         inputEl.focus();
 
-        inputEl.addEventListener('keydown', (event) => {
-            if (event.key === 'Enter') {
+        inputEl.addEventListener('keydown', (event) =>
+        {
+            if (event.key === 'Enter')
+            {
                 const dateValue = inputEl.value;
                 this.callback(dateValue);
                 this.close();
@@ -1118,7 +1200,8 @@ class SingleDatePromptModal extends Modal {
         });
 
         const okButtonEl = containerEl.createEl('button', { text: 'OK', cls: 'date-button' });
-        okButtonEl.addEventListener('click', () => {
+        okButtonEl.addEventListener('click', () =>
+        {
             const dateValue = inputEl.value;
             this.callback(dateValue);
             this.close();
@@ -1127,15 +1210,17 @@ class SingleDatePromptModal extends Modal {
         contentEl.appendChild(containerEl);
     }
 
-    onClose() {
+    onClose()
+    {
         const { contentEl } = this;
         contentEl.empty();
     }
 }
 
-
-class DateRangePromptModal extends Modal {
-    constructor(app, promptText, callback, defaultStartDate = null, defaultMultiDay = false) {
+class DateRangePromptModal extends Modal
+{
+    constructor(app, promptText, callback, defaultStartDate = null, defaultMultiDay = false)
+    {
         super(app);
         this.promptText = promptText;
         this.callback = callback;
@@ -1143,21 +1228,23 @@ class DateRangePromptModal extends Modal {
         this.defaultMultiDay = defaultMultiDay;
     }
 
-    onOpen() {
+    onOpen()
+    {
         const { contentEl } = this;
         contentEl.createEl('h2', { text: this.promptText });
 
         const containerEl = contentEl.createEl('div', { cls: 'date-container' });
-
         const startInputEl = containerEl.createEl('input', { type: 'date', cls: 'date-input' });
         startInputEl.focus();
 
-        if (this.defaultStartDate) {
+        if (this.defaultStartDate)
+        {
             startInputEl.value = this.defaultStartDate;
         }
 
         const todayButtonEl = containerEl.createEl('button', { text: 'Heute', cls: 'date-button' });
-        todayButtonEl.addEventListener('click', () => {
+        todayButtonEl.addEventListener('click', () =>
+        {
             const today = new Date().toISOString().split('T')[0];
             startInputEl.value = today;
             this.callback({ startDate: today });
@@ -1165,28 +1252,25 @@ class DateRangePromptModal extends Modal {
         });
 
         const multiDayContainer = containerEl.createEl('div', { cls: 'multi-day-container' });
-
         const multiDayCheckboxEl = multiDayContainer.createEl('input', { type: 'checkbox', cls: 'multi-day-checkbox' });
         multiDayCheckboxEl.id = 'multiDayCheckbox';
 
         multiDayCheckboxEl.checked = this.defaultMultiDay;
-
         const multiDayLabelEl = multiDayContainer.createEl('label', { text: 'Mehrtägig', cls: 'multi-day-label' });
         multiDayLabelEl.htmlFor = 'multiDayCheckbox';
 
         const endInputEl = containerEl.createEl('input', { type: 'date', cls: 'date-input' });
         endInputEl.style.display = this.defaultMultiDay ? 'block' : 'none';
 
-        multiDayCheckboxEl.addEventListener('change', () => {
-            if (multiDayCheckboxEl.checked) {
-                endInputEl.style.display = 'block';
-            } else {
-                endInputEl.style.display = 'none';
-            }
+        multiDayCheckboxEl.addEventListener('change', () =>
+        {
+            endInputEl.style.display = multiDayCheckboxEl.checked ? 'block' : 'none';
         });
 
-        startInputEl.addEventListener('keydown', (event) => {
-            if (event.key === 'Enter') {
+        startInputEl.addEventListener('keydown', (event) =>
+        {
+            if (event.key === 'Enter')
+            {
                 const dateValue = startInputEl.value;
                 const endDate = multiDayCheckboxEl.checked ? endInputEl.value : null;
                 this.callback({ startDate: dateValue, endDate });
@@ -1195,7 +1279,8 @@ class DateRangePromptModal extends Modal {
         });
 
         const okButtonEl = containerEl.createEl('button', { text: 'OK', cls: 'date-button' });
-        okButtonEl.addEventListener('click', () => {
+        okButtonEl.addEventListener('click', () =>
+        {
             const dateValue = startInputEl.value;
             const endDate = multiDayCheckboxEl.checked ? endInputEl.value : null;
             this.callback({ startDate: dateValue, endDate });
@@ -1210,14 +1295,17 @@ class DateRangePromptModal extends Modal {
         contentEl.appendChild(containerEl);
     }
 
-    onClose() {
+    onClose()
+    {
         const { contentEl } = this;
         contentEl.empty();
     }
 }
 
-class DropdownModal extends Modal {
-    constructor(app, promptText, options, callback, showTodayButton = false, validateTodayCallback = null, allowNewCustomer = false, createNewCustomerCallback = null) {
+class DropdownModal extends Modal
+{
+    constructor(app, promptText, options, callback, showTodayButton = false, validateTodayCallback = null, allowNewCustomer = false, createNewCustomerCallback = null)
+    {
         super(app);
         this.promptText = promptText;
         this.options = options;
@@ -1228,20 +1316,26 @@ class DropdownModal extends Modal {
         this.createNewCustomerCallback = createNewCustomerCallback;
     }
 
-    onOpen() {
+    onOpen()
+    {
         const { contentEl } = this;
         contentEl.createEl('h2', { text: this.promptText });
 
         const containerEl = contentEl.createEl('div', { cls: 'dropdown-container' });
 
-        if (this.showTodayButton) {
+        if (this.showTodayButton)
+        {
             const todayButtonEl = containerEl.createEl('button', { text: 'Heute', cls: 'dropdown-button' });
-            todayButtonEl.addEventListener('click', () => {
+            todayButtonEl.addEventListener('click', () =>
+            {
                 const today = new Date().toISOString().split('T')[0];
-                if (this.validateTodayCallback && this.validateTodayCallback(today)) {
+                if (this.validateTodayCallback && this.validateTodayCallback(today))
+                {
                     this.callback(today);
                     this.close();
-                } else {
+                }
+                else
+                {
                     new Notice('Remote-Tag für heute existiert nicht.');
                 }
             });
@@ -1253,55 +1347,72 @@ class DropdownModal extends Modal {
         const dropdownEl = containerEl.createEl('select', { cls: 'dropdown' });
         dropdownEl.size = this.options.length > 10 ? 10 : this.options.length;
 
-        this.options.forEach(option => {
+        this.options.forEach(option =>
+        {
             const optionEl = dropdownEl.createEl('option', { text: option });
             optionEl.value = option;
 
-            optionEl.addEventListener('dblclick', () => {
+            optionEl.addEventListener('dblclick', () =>
+            {
                 this.callback(optionEl.value);
                 this.close();
             });
         });
 
-        inputEl.addEventListener('input', () => {
+        inputEl.addEventListener('input', () =>
+        {
             const filter = inputEl.value.toLowerCase();
             let firstVisibleOption = null;
             let visibleOptionsCount = 0;
-            for (let i = 0; i < dropdownEl.options.length; i++) {
+            for (let i = 0; i < dropdownEl.options.length; i++)
+            {
                 const option = dropdownEl.options[i];
-                if (option.text.toLowerCase().includes(filter)) {
+                if (option.text.toLowerCase().includes(filter))
+                {
                     option.style.display = '';
                     if (!firstVisibleOption) firstVisibleOption = option;
                     visibleOptionsCount++;
-                } else {
+                }
+                else
+                {
                     option.style.display = 'none';
                 }
             }
-            if (firstVisibleOption) {
+            if (firstVisibleOption)
+            {
                 dropdownEl.value = firstVisibleOption.value;
             }
             dropdownEl.size = visibleOptionsCount > 10 ? 10 : visibleOptionsCount;
         });
 
-        dropdownEl.addEventListener('keydown', (event) => {
-            if (event.key === 'Enter') {
+        dropdownEl.addEventListener('keydown', (event) =>
+        {
+            if (event.key === 'Enter')
+            {
                 event.preventDefault();
                 this.callback(dropdownEl.value);
                 this.close();
-            } else if (event.key === 'Tab') {
+            }
+            else if (event.key === 'Tab')
+            {
                 event.preventDefault();
                 inputEl.focus();
             }
         });
 
-        inputEl.addEventListener('keydown', (event) => {
-            if (event.key === 'Enter') {
+        inputEl.addEventListener('keydown', (event) =>
+        {
+            if (event.key === 'Enter')
+            {
                 event.preventDefault();
-                if (dropdownEl.options.length > 0) {
+                if (dropdownEl.options.length > 0)
+                {
                     this.callback(dropdownEl.value);
                     this.close();
                 }
-            } else if (event.key === 'ArrowDown') {
+            }
+            else if (event.key === 'ArrowDown')
+            {
                 event.preventDefault();
                 dropdownEl.focus();
             }
@@ -1309,119 +1420,150 @@ class DropdownModal extends Modal {
 
         contentEl.appendChild(containerEl);
 
-        if (this.allowNewCustomer) {
+        if (this.allowNewCustomer)
+        {
             const newCustomerButton = contentEl.createEl('button', { text: 'Neuen Kunden erstellen', cls: 'new-customer-button' });
-            newCustomerButton.addEventListener('click', () => {
+            newCustomerButton.addEventListener('click', () =>
+            {
                 this.openNewCustomerModal();
             });
         }
     }
 
-    openNewCustomerModal() {
-        const modal = new PromptModal(this.app, 'Neuen Kundennamen eingeben', async (newCustomerName) => {
-            if (newCustomerName) {
-                if (this.createNewCustomerCallback) {
+    openNewCustomerModal()
+    {
+        const modal = new PromptModal(this.app, 'Neuen Kundennamen eingeben', async (newCustomerName) =>
+        {
+            if (newCustomerName)
+            {
+                if (this.createNewCustomerCallback)
+                {
                     await this.createNewCustomerCallback(newCustomerName);
                     this.options.push(newCustomerName);
                     this.refreshDropdown();
                     this.callback(newCustomerName);
                     this.close();
-                } else {
+                }
+                else
+                {
                     new Notice('Fehler: createNewCustomerCallback nicht definiert.');
                 }
-            } else {
+            }
+            else
+            {
                 new Notice('Kein Kundennamen eingegeben.');
             }
         });
         modal.open();
     }
 
-    refreshDropdown() {
+    refreshDropdown()
+    {
         const dropdownEl = this.contentEl.querySelector('.dropdown');
         dropdownEl.innerHTML = '';
 
-        this.options.forEach(option => {
+        this.options.forEach(option =>
+        {
             const optionEl = dropdownEl.createEl('option', { text: option });
             optionEl.value = option;
 
-            optionEl.addEventListener('dblclick', () => {
+            optionEl.addEventListener('dblclick', () =>
+            {
                 this.callback(optionEl.value);
                 this.close();
             });
         });
     }
 
-    onClose() {
+    onClose()
+    {
         const { contentEl } = this;
         contentEl.empty();
     }
 }
 
-class ConfirmPromptModal extends Modal {
-    constructor(app, promptText, callback) {
+class ConfirmPromptModal extends Modal
+{
+    constructor(app, promptText, callback)
+    {
         super(app);
         this.promptText = promptText;
         this.callback = callback;
     }
 
-    onOpen() {
+    onOpen()
+    {
         const { contentEl } = this;
         contentEl.createEl('h2', { text: this.promptText });
 
         const buttonContainer = contentEl.createEl('div', { cls: 'button-container' });
-
         const yesButton = buttonContainer.createEl('button', { text: 'Ja' });
-        yesButton.addEventListener('click', () => {
+        yesButton.addEventListener('click', () =>
+        {
             this.callback(true);
             this.close();
         });
 
         const noButton = buttonContainer.createEl('button', { text: 'Nein' });
-        noButton.addEventListener('click', () => {
+        noButton.addEventListener('click', () =>
+        {
             this.callback(false);
             this.close();
         });
     }
 
-    onClose() {
+    onClose()
+    {
         const { contentEl } = this;
         contentEl.empty();
     }
 }
 
-class ConfirmModal extends Modal {
-    constructor(app, promptText, callback) {
+class ConfirmModal extends Modal
+{
+    constructor(app, promptText, callback)
+    {
         super(app);
         this.promptText = promptText;
         this.callback = callback;
     }
 
-    onOpen() {
+    onOpen()
+    {
         const { contentEl } = this;
         contentEl.createEl('h2', { text: this.promptText });
 
         const buttonEl = contentEl.createEl('button', { text: 'Öffnen' });
-        buttonEl.addEventListener('click', () => {
+        buttonEl.addEventListener('click', () =>
+        {
             this.callback();
             this.close();
         });
     }
 
-    onClose() {
+    onClose()
+    {
         const { contentEl } = this;
         contentEl.empty();
     }
 }
 
-class CalendarModal extends Modal {
-    constructor(app, plugin) {
+// #endregion
+
+// #region Calendar and Info Modals (No logic changed, just cleaned up spacing and comments)
+
+class CalendarModal extends Modal
+{
+    constructor(app, plugin)
+    {
         super(app);
         this.plugin = plugin;
         this.currentDate = new Date();
         this.highlightedDate = null;
     }
 
-    onOpen() {
+    onOpen()
+    {
         const { contentEl } = this;
         contentEl.empty();
 
@@ -1437,20 +1579,23 @@ class CalendarModal extends Modal {
         const navContainer = contentEl.createEl('div', { cls: 'calendar-nav' });
 
         const prevButton = navContainer.createEl('button', { text: '← Vorherige 4 Monate', cls: 'prev-button' });
-        prevButton.addEventListener('click', () => {
+        prevButton.addEventListener('click', () =>
+        {
             this.currentDate.setMonth(this.currentDate.getMonth() - 4);
             this.renderCalendar();
         });
 
         const todayButton = navContainer.createEl('button', { text: 'Heute', cls: 'today-button' });
-        todayButton.addEventListener('click', () => {
+        todayButton.addEventListener('click', () =>
+        {
             this.currentDate = new Date();
             this.highlightedDate = null;
             this.renderCalendar();
         });
 
         const nextButton = navContainer.createEl('button', { text: 'Nächste 4 Monate →', cls: 'next-button' });
-        nextButton.addEventListener('click', () => {
+        nextButton.addEventListener('click', () =>
+        {
             this.currentDate.setMonth(this.currentDate.getMonth() + 4);
             this.renderCalendar();
         });
@@ -1458,9 +1603,11 @@ class CalendarModal extends Modal {
         const searchContainer = contentEl.createEl('div', { cls: 'calendar-search' });
         const searchInput = searchContainer.createEl('input', { type: 'date' });
         const searchButton = searchContainer.createEl('button', { text: 'Springe zu Datum' });
-        searchButton.addEventListener('click', () => {
+        searchButton.addEventListener('click', () =>
+        {
             const selectedDate = new Date(searchInput.value);
-            if (!isNaN(selectedDate)) {
+            if (!isNaN(selectedDate))
+            {
                 this.currentDate = selectedDate;
                 this.highlightedDate = selectedDate;
                 this.renderCalendar();
@@ -1472,7 +1619,8 @@ class CalendarModal extends Modal {
         this.renderCalendar();
     }
 
-    renderCalendar() {
+    renderCalendar()
+    {
         const { calendarContainer } = this;
         calendarContainer.empty();
 
@@ -1481,13 +1629,13 @@ class CalendarModal extends Modal {
 
         const startMonth = new Date(Date.UTC(this.currentDate.getUTCFullYear(), this.currentDate.getUTCMonth(), 1));
 
-        for (let i = 0; i < 4; i++) {
+        for (let i = 0; i < 4; i++)
+        {
             const monthDate = new Date(Date.UTC(startMonth.getUTCFullYear(), startMonth.getUTCMonth() + i, 1));
             const monthEl = calendarContainer.createEl('div', { cls: 'calendar-month' });
             monthEl.createEl('h3', { text: monthDate.toLocaleString('default', { month: 'long', year: 'numeric' }) });
 
             const daysEl = monthEl.createEl('div', { cls: 'calendar-days' });
-
             const firstDayOfMonth = new Date(Date.UTC(monthDate.getUTCFullYear(), monthDate.getUTCMonth(), 1));
             const firstDayWeekday = (firstDayOfMonth.getUTCDay() + 6) % 7;
             const displayStartDate = new Date(firstDayOfMonth);
@@ -1500,7 +1648,8 @@ class CalendarModal extends Modal {
 
             let currentDate = new Date(displayStartDate);
 
-            while (currentDate <= displayEndDate) {
+            while (currentDate <= displayEndDate)
+            {
                 const dateStr = currentDate.toISOString().split('T')[0];
                 const dayEl = daysEl.createEl('div', { cls: 'calendar-day' });
 
@@ -1511,49 +1660,56 @@ class CalendarModal extends Modal {
                                 currentDate.getUTCMonth() === today.getUTCMonth() &&
                                 currentDate.getUTCDate() === today.getUTCDate();
 
-                if (isToday) {
+                if (isToday)
+                {
                     dayEl.addClass('today');
                 }
 
-                if (this.highlightedDate) {
+                if (this.highlightedDate)
+                {
                     const isHighlighted = currentDate.getUTCFullYear() === this.highlightedDate.getUTCFullYear() &&
                                           currentDate.getUTCMonth() === this.highlightedDate.getUTCMonth() &&
                                           currentDate.getUTCDate() === this.highlightedDate.getUTCDate();
-                    if (isHighlighted) {
+                    if (isHighlighted)
+                    {
                         dayEl.addClass('highlighted-date');
                     }
                 }
 
-                if (currentDate.getUTCMonth() !== monthDate.getUTCMonth()) {
+                if (currentDate.getUTCMonth() !== monthDate.getUTCMonth())
+                {
                     dayEl.addClass('other-month');
                 }
 
                 const dayOfWeek = currentDate.getUTCDay();
-                if (dayOfWeek === 0 || dayOfWeek === 6) {
+                if (dayOfWeek === 0 || dayOfWeek === 6)
+                {
                     dayNumberEl.addClass('weekend');
                 }
 
                 const dayDeployments = deployments[dateStr] || [];
                 const isRemoteDay = remoteDays[dateStr];
 
-                if (dayDeployments.length > 0 || isRemoteDay) {
+                if (dayDeployments.length > 0 || isRemoteDay)
+                {
                     const eventsEl = dayEl.createEl('div', { cls: 'day-events' });
 
-                    if (isRemoteDay) {
+                    if (isRemoteDay)
+                    {
                         const eventClass = isRemoteDay.archived ? 'remote-event archived' : 'remote-event';
                         eventsEl.createEl('div', { text: 'Remote', cls: `event ${eventClass}` });
                     }
 
-                    for (const deployment of dayDeployments) {
+                    for (const deployment of dayDeployments)
+                    {
                         let eventClass;
-                        if (deployment.completed) {
+                        if (deployment.completed)
+                        {
                             eventClass = 'deployment-completed-event';
-                        } else {
-                            if (deployment.preCheckDone) {
-                                eventClass = 'deployment-event';
-                            } else {
-                                eventClass = 'deployment-new-event';
-                            }
+                        }
+                        else
+                        {
+                            eventClass = deployment.preCheckDone ? 'deployment-event' : 'deployment-new-event';
                         }
 
                         eventsEl.createEl('div', {
@@ -1563,10 +1719,14 @@ class CalendarModal extends Modal {
                     }
                 }
 
-                dayEl.addEventListener('click', () => {
-                    if (dayDeployments.length > 0 || isRemoteDay) {
+                dayEl.addEventListener('click', () =>
+                {
+                    if (dayDeployments.length > 0 || isRemoteDay)
+                    {
                         this.openDayInfoModal(dateStr);
-                    } else {
+                    }
+                    else
+                    {
                         this.openCreateModal(dateStr);
                     }
                 });
@@ -1576,74 +1736,87 @@ class CalendarModal extends Modal {
         }
     }
 
-    openCreateModal(dateStr) {
+    openCreateModal(dateStr)
+    {
         const modal = new ChooseActionModal(this.app, dateStr, this.plugin);
         modal.open();
-        modal.onClose = () => {
+        modal.onClose = () =>
+        {
             this.renderCalendar();
         };
     }
 
-    openDayInfoModal(dateStr) {
+    openDayInfoModal(dateStr)
+    {
         const modal = new DayInfoModal(this.app, dateStr, this.plugin);
         modal.open();
     }
 
-    refreshCalendar() {
+    refreshCalendar()
+    {
         this.renderCalendar();
     }
 
-    onClose() {
+    onClose()
+    {
         const { contentEl } = this;
         contentEl.empty();
     }
 }
 
-class ChooseActionModal extends Modal {
-    constructor(app, dateStr, plugin) {
+class ChooseActionModal extends Modal
+{
+    constructor(app, dateStr, plugin)
+    {
         super(app);
         this.dateStr = dateStr;
         this.plugin = plugin;
     }
 
-    onOpen() {
+    onOpen()
+    {
         const { contentEl } = this;
         contentEl.empty();
 
         contentEl.addClass('choose-action-modal');
-
         contentEl.createEl('h2', { text: 'Aktion wählen' });
         contentEl.createEl('p', { text: `Datum: ${this.dateStr}` });
 
         const buttonContainer = contentEl.createEl('div', { cls: 'button-container' });
 
         const createDeploymentButton = buttonContainer.createEl('button', { text: 'Einsatz erstellen' });
-        createDeploymentButton.addEventListener('click', async () => {
+        createDeploymentButton.addEventListener('click', async () =>
+        {
             await this.plugin.createNewDeploymentWithDate(this.dateStr);
             this.close();
         });
 
         const createRemoteDayButton = buttonContainer.createEl('button', { text: 'Remote-Tag erstellen' });
-        createRemoteDayButton.addEventListener('click', async () => {
+        createRemoteDayButton.addEventListener('click', async () =>
+        {
             await this.plugin.createNewRemoteDayWithDate(this.dateStr);
             this.close();
         });
     }
 
-    onClose() {
+    onClose()
+    {
         const { contentEl } = this;
         contentEl.empty();
     }
 }
 
-class DayInfoModal extends Modal {
-    constructor(app, dateStr, plugin) {
+class DayInfoModal extends Modal
+{
+    constructor(app, dateStr, plugin)
+    {
         super(app);
         this.dateStr = dateStr;
         this.plugin = plugin;
     }
 
-    async onOpen() {
+    async onOpen()
+    {
         const { contentEl } = this;
         contentEl.empty();
 
@@ -1656,48 +1829,58 @@ class DayInfoModal extends Modal {
         const isRemoteDay = this.plugin.getRemoteDates()[this.dateStr];
 
         const infoEl = contentEl.createEl('div', { cls: 'info-text' });
-
         const buttonContainer = contentEl.createEl('div', { cls: 'button-container' });
 
-        if (isRemoteDay) {
+        if (isRemoteDay)
+        {
             const remoteInfo = '- **Typ:** Remote';
             await MarkdownRenderer.renderMarkdown(remoteInfo, infoEl, '', this);
 
             const openScheduleButton = buttonContainer.createEl('button', { text: 'Remote-Zeitplan öffnen' });
-            openScheduleButton.addEventListener('click', async () => {
+            openScheduleButton.addEventListener('click', async () =>
+            {
                 await this.plugin.openRemoteSchedule(this.dateStr);
                 this.close();
             });
         }
 
-        for (const deployment of deployments) {
+        for (const deployment of deployments)
+        {
             const deploymentInfo = `- **Typ:** Einsatz\n  **Kunde:** ${deployment.customerName}\n  **Kurzbeschrieb:** ${deployment.kurzbeschrieb}\n  **Einsatzdaten:** ${deployment.folderName}`;
             await MarkdownRenderer.renderMarkdown(deploymentInfo, infoEl, '', this);
 
             const openDeploymentButton = buttonContainer.createEl('button', { text: `Zum Einsatz von ${deployment.customerName}` });
-            openDeploymentButton.addEventListener('click', async () => {
+            openDeploymentButton.addEventListener('click', async () =>
+            {
                 await this.plugin.openDeploymentFile(deployment);
                 this.close();
             });
         }
 
         const newEventButton = buttonContainer.createEl('button', { text: 'Neuen Termin erstellen' });
-        newEventButton.addEventListener('click', () => {
+        newEventButton.addEventListener('click', () =>
+        {
             this.close();
             this.plugin.openCreateModal(this.dateStr);
         });
 
         const closeButton = buttonContainer.createEl('button', { text: 'Schließen' });
-        closeButton.addEventListener('click', () => {
+        closeButton.addEventListener('click', () =>
+        {
             this.close();
         });
     }
 
-    onClose() {
+    onClose()
+    {
         const { contentEl } = this;
         contentEl.empty();
     }
 }
+
+// #endregion
+
+// #region Styles
 
 const style = document.createElement('style');
 style.textContent = `
@@ -1935,5 +2118,7 @@ style.textContent = `
 }
 `;
 document.head.appendChild(style);
+
+// #endregion
 
 module.exports = SoftwarePlanner;
