@@ -13,7 +13,8 @@ const DEFAULT_SETTINGS = {
     remoteDayDestinationPath: '',
     deploymentTemplatePath: '',
     remoteTaskTemplatePath: '',
-    xmlProgramPath: ''
+    xmlProgramPath: '',
+    deploymentTypesPath: '' // NEW: Path for deployment types
 };
 
 // Utility function to copy folders
@@ -44,6 +45,13 @@ function getExistingFolders(basePath) {
         .map(entry => entry.name);
 }
 
+// Utility function to get files (non-directory) from a folder
+function getFilesInFolder(basePath) { // NEW: To get deployment type files
+    if (!fs.existsSync(basePath)) return [];
+    return fs.readdirSync(basePath, { withFileTypes: true })
+        .filter(entry => entry.isFile())
+        .map(entry => entry.name);
+}
 
 // Utility function to create and update the task file
 async function createUpdatedTaskFile(templatePath, destinationPath, customerName) {
@@ -71,6 +79,35 @@ class SoftwarePlannerSettingTab extends PluginSettingTab {
         this.addPathSetting(containerEl, 'Kunden Vorlagenpfad', 'customerTemplatePath');
         this.addPathSetting(containerEl, 'Kundeneinsatz Vorlagenpfad', 'deploymentTemplatePath');
         this.addPathSetting(containerEl, 'Kunden Zielverzeichnispfad', 'customerDestinationPath');
+
+        // NEW: Setting for Deployment Types directory
+        new Setting(containerEl)
+            .setName('Einsatztypen Verzeichnis')
+            .setDesc('Verzeichnis mit Dateien für verschiedene Einsatz-Typen')
+            .addText(text => text
+                .setPlaceholder('Pfad angeben')
+                .setValue(this.plugin.settings.deploymentTypesPath || '')
+                .onChange(async (value) => {
+                    this.plugin.settings.deploymentTypesPath = value;
+                    await this.plugin.saveSettings();
+                }))
+            .addButton(button => button
+                .setButtonText('Durchsuchen')
+                .setCta()
+                .onClick(async () => {
+                    const result = await remote.dialog.showOpenDialog({
+                        properties: ['openDirectory']
+                    });
+                    if (!result.canceled) {
+                        const selectedPath = result.filePaths[0];
+                        const vaultPath = this.app.vault.adapter.basePath;
+                        const relativePath = path.relative(vaultPath, selectedPath);
+
+                        this.plugin.settings.deploymentTypesPath = relativePath;
+                        await this.plugin.saveSettings();
+                        this.display();
+                    }
+                }));
 
         // Remote Settings
         containerEl.createEl('h3', { text: 'Remote Settings' });
@@ -224,7 +261,6 @@ class SoftwarePlanner extends Plugin {
     createRibbonIcons() {
         this.addRibbonIcon('user-plus', 'Neuer Kunde', () => this.createNewCustomer());
         this.addRibbonIcon('log-out', 'Neuer Einsatz', () => this.createNewDeployment());
-        // Ribbon Icon für "Neuen Remote-Tag" aktualisieren
         this.addRibbonIcon('screen-share', 'Neuer Remote-Tag', async () => {
             const dateStr = await this.promptSingleDate('Datum des Remote-Tags auswählen');
             if (dateStr) {
@@ -311,6 +347,42 @@ class SoftwarePlanner extends Plugin {
         }
     }
 
+    // NEW: Prompt the user to select a deployment type file
+    async promptDeploymentType() {
+        if (!this.settings.deploymentTypesPath) {
+            new Notice('Deployment-Typ-Verzeichnis ist nicht definiert. Bitte in den Einstellungen setzen.');
+            return null;
+        }
+
+        const typesBasePath = path.join(this.app.vault.adapter.basePath, this.settings.deploymentTypesPath);
+        if (!fs.existsSync(typesBasePath)) {
+            new Notice('Deployment-Typ-Verzeichnis existiert nicht.');
+            return null;
+        }
+
+        const files = getFilesInFolder(typesBasePath);
+        if (files.length === 0) {
+            new Notice('Keine Deployment-Typ-Dateien gefunden.');
+            return null;
+        }
+
+        // Show only file names without extension in the dropdown
+        const options = files.map(file => path.parse(file).name);
+
+        const chosen = await this.promptDropdown('Einsatztyp wählen', options);
+        if (!chosen) return null;
+
+        // Once chosen, read the content of the file
+        const chosenFile = files.find(f => path.parse(f).name === chosen);
+        if (!chosenFile) return null;
+
+        const chosenFilePath = path.join(typesBasePath, chosenFile);
+        const content = await fs.promises.readFile(chosenFilePath, 'utf8');
+
+        // The "title" = chosen (the file name without extension)
+        // The "checklist" = full content of the file
+        return { title: chosen, checklist: content };
+    }
 
     async createNewDeployment() {
         if (!this.settings.deploymentTemplatePath || !this.settings.customerDestinationPath) {
@@ -335,6 +407,13 @@ class SoftwarePlanner extends Plugin {
         const deploymentDates = await this.promptDateRange('Startdatum des Einsatzes angeben (YYYY-MM-DD)');
         if (!deploymentDates) return;
 
+        // NEW: Prompt for deployment type
+        const deploymentTypeData = await this.promptDeploymentType();
+        if (!deploymentTypeData) {
+            new Notice('Kein Einsatztyp gewählt.');
+            return;
+        }
+
         const folderName = deploymentDates.endDate
             ? `${deploymentDates.startDate} - ${deploymentDates.endDate}`
             : deploymentDates.startDate;
@@ -344,7 +423,13 @@ class SoftwarePlanner extends Plugin {
 
         try {
             await copyFolder(templatePath, customerPath);
-            await this.updateEinsatzMd(path.join(customerPath, 'Einsatz.md'), customerName, deploymentDates.startDate);
+            await this.updateEinsatzMd(
+                path.join(customerPath, 'Einsatz.md'),
+                customerName,
+                deploymentDates.startDate,
+                deploymentTypeData.title,    // NEW
+                deploymentTypeData.checklist // NEW
+            );
             new Notice(`Einsatz erstellt für ${customerName} vom ${folderName}`);
         } catch (error) {
             console.error(`Fehler beim Erstellen des Einsatzes: ${error.message}`);
@@ -352,6 +437,69 @@ class SoftwarePlanner extends Plugin {
         }
     }
 
+    // CHANGED: Added deployment type prompt to createNewDeploymentWithDate as well
+    async createNewDeploymentWithDate(deploymentDate) {
+        if (!this.settings.deploymentTemplatePath || !this.settings.customerDestinationPath) {
+            new Notice('Setze die Einsatzvorlage und den Kundenzielpfad in den Einstellungen.');
+            return;
+        }
+
+        const customers = getExistingFolders(path.join(this.app.vault.adapter.basePath, this.settings.customerDestinationPath));
+
+        const customerName = await this.promptDropdown(
+            'Kunden wählen',
+            customers,
+            false,
+            null,
+            true, // allowNewCustomer
+            async (newCustomerName) => {
+                await this.createNewCustomerWithName(newCustomerName);
+            }
+        );
+        if (!customerName) return;
+
+        const deploymentDates = await this.promptDateRange('Startdatum des Einsatzes angeben (YYYY-MM-DD)', deploymentDate);
+        if (!deploymentDates) return;
+
+        // NEW: Prompt for deployment type
+        const deploymentTypeData = await this.promptDeploymentType();
+        if (!deploymentTypeData) {
+            new Notice('Kein Einsatztyp gewählt.');
+            return;
+        }
+
+        const folderName = deploymentDates.endDate
+            ? `${deploymentDates.startDate} - ${deploymentDates.endDate}`
+            : deploymentDates.startDate;
+
+        const customerPath = path.join(
+            this.app.vault.adapter.basePath,
+            this.settings.customerDestinationPath,
+            customerName,
+            '1. Einsätze',
+            folderName
+        );
+        const templatePath = path.join(this.app.vault.adapter.basePath, this.settings.deploymentTemplatePath);
+
+        try {
+            await copyFolder(templatePath, customerPath);
+            await this.updateEinsatzMd(
+                path.join(customerPath, 'Einsatz.md'),
+                customerName,
+                deploymentDates.startDate,
+                deploymentTypeData.title,    // NEW
+                deploymentTypeData.checklist // NEW
+            );
+            new Notice(`Einsatz erstellt für ${customerName} vom ${folderName}`);
+        } catch (error) {
+            console.error(`Fehler beim Erstellen des Einsatzes: ${error.message}`);
+            new Notice(`Fehler beim Erstellen des Einsatzes: ${error.message}`);
+        }
+
+        if (this.calendarModalInstance) {
+            this.calendarModalInstance.refreshCalendar();
+        }
+    }
 
     async createNewRemoteTask() {
         if (!this.settings.remoteTaskTemplatePath || !this.settings.remoteDayDestinationPath) {
@@ -374,7 +522,7 @@ class SoftwarePlanner extends Plugin {
 
         try {
             await copyFolder(templatePath, remoteTaskPath);
-            await addTaskToSchedule(schedulePath, taskName);
+            await this.addTaskToSchedule(schedulePath, taskName);
             await createUpdatedTaskFile(taskFileTemplatePath, taskFilePath, taskName);
             new Notice(`Remote Auftragsordner erstellt für ${taskName} am ${remoteDay}`);
         } catch (error) {
@@ -468,13 +616,18 @@ class SoftwarePlanner extends Plugin {
         return inProgressTasks;
     }
 
-    async updateEinsatzMd(einsatzFilePath, customerName, deploymentDate) {
+    // CHANGED: Now we accept title and checklist to replace placeholders
+    async updateEinsatzMd(einsatzFilePath, customerName, deploymentDate, deploymentTitle = '', deploymentChecklist = '') {
         try {
             let content = await fs.promises.readFile(einsatzFilePath, 'utf8');
 
             // Kunde und Datum in den Einsatz.md-Inhalt einfügen
             content = content.replace('**Kunde**:', `**Kunde**: ${customerName}`);
             content = content.replace('**Datum**:', `**Datum**: ${deploymentDate}`);
+
+            // NEW: Insert the deployment type title and checklist
+            content = content.replace('[Title]', deploymentTitle);
+            content = content.replace('[Checklist]', deploymentChecklist);
 
             await fs.promises.writeFile(einsatzFilePath, content, 'utf8');
         } catch (error) {
@@ -511,7 +664,6 @@ class SoftwarePlanner extends Plugin {
         });
     }
 
-    // Neue Hilfsmethode zum Anzeigen einer Bestätigungsaufforderung
     async promptConfirm(promptText) {
         return new Promise((resolve) => {
             const modal = new ConfirmPromptModal(this.app, promptText, resolve);
@@ -519,7 +671,6 @@ class SoftwarePlanner extends Plugin {
         });
     }
 
-    // Add XML file extension support
     addXMLFileExtension() {
         this.registerExtensions(['xml'], 'markdown');
 
@@ -532,7 +683,6 @@ class SoftwarePlanner extends Plugin {
         );
     }
 
-    // Show confirmation dialog to open XML file
     showXMLConfirmDialog(file) {
         const xmlProgramPath = this.settings.xmlProgramPath;
         if (!xmlProgramPath) {
@@ -544,12 +694,10 @@ class SoftwarePlanner extends Plugin {
         const activeLeaf = this.app.workspace.activeLeaf;
 
         const modal = new ConfirmModal(this.app, 'XML öffnen im XML Visualizer', () => {
-            // Schließe das aktive Leaf sofort
             if (activeLeaf && activeLeaf.view.file && activeLeaf.view.file.path === file.path) {
-                activeLeaf.detach(); // Das Leaf (Tab) sofort schließen
+                activeLeaf.detach();
             }
 
-            // Startet das externe Programm
             exec(`"${xmlProgramPath}" "${filePath}"`, (error) => {
                 if (error) {
                     console.error(`Fehler beim Öffnen des XML-Files: ${error.message}`);
@@ -560,13 +708,11 @@ class SoftwarePlanner extends Plugin {
         modal.open();
     }
 
-    // Methode zum Öffnen des Kalenders
     openCalendar() {
         this.calendarModalInstance = new CalendarModal(this.app, this);
         this.calendarModalInstance.open();
     }
 
-    // Methoden zum Abrufen der Einsatz- und Remote-Daten
     getDeploymentDates() {
         const customerBasePath = path.join(this.app.vault.adapter.basePath, this.settings.customerDestinationPath);
         const customers = getExistingFolders(customerBasePath);
@@ -596,7 +742,7 @@ class SoftwarePlanner extends Plugin {
                         if (isSingleDay || (currentDayOfWeek !== 0 && currentDayOfWeek !== 6)) {
                             const dateStr = currentDate.toISOString().split('T')[0];
 
-                            // Path to Einsatz.md
+                            // Pfad zur Einsatz.md
                             const einsatzMdPath = path.join(
                                 this.app.vault.adapter.basePath,
                                 this.settings.customerDestinationPath,
@@ -608,11 +754,22 @@ class SoftwarePlanner extends Plugin {
 
                             let completed = false;
                             let preCheckDone = false;
+                            let kurzbeschrieb = "Unbekannt"; // Default if not found
 
                             try {
                                 const einsatzContent = fs.readFileSync(einsatzMdPath, 'utf8');
                                 // Check if completed (green)
                                 completed = einsatzContent.includes('- [x] **Auftrag abgeschlossen**');
+
+                                // Extract Kurzbeschrieb from "Kurzbeschrieb Auftrag" section
+                                // We look for a pattern:
+                                // ### Kurzbeschrieb Auftrag
+                                //
+                                // ##### SomeDeploymentType
+                                const titleMatch = einsatzContent.match(/### Kurzbeschrieb Auftrag[\s\S]*?#####\s*(.*?)\r?\n/);
+                                if (titleMatch && titleMatch[1]) {
+                                    kurzbeschrieb = titleMatch[1].trim();
+                                }
 
                                 if (!completed) {
                                     // Check for "Abklären" section
@@ -620,25 +777,20 @@ class SoftwarePlanner extends Plugin {
                                     const abklaerenMatch = einsatzContent.match(abklaerenSectionRegex);
 
                                     if (abklaerenMatch) {
-                                        // Extract tasks in "Abklären" section
                                         const abklaerenContent = abklaerenMatch[1];
-                                        // Find all checklist lines: - [ ] or - [x]
                                         const tasks = abklaerenContent.match(/- \[[ x]\]/g);
-
                                         if (tasks && tasks.length > 0) {
-                                            // Check if all are checked
                                             const allChecked = tasks.every(t => t.includes('- [x]'));
                                             preCheckDone = allChecked;
                                         } else {
-                                            // If no tasks found, we consider preCheckDone = true
-                                            // (though it's unusual to have "Abklären" with no tasks)
                                             preCheckDone = true;
                                         }
                                     } else {
-                                        // No "Abklären" section found, preCheckDone = true by default
+                                        // No "Abklären" section found, preCheckDone = true
                                         preCheckDone = true;
                                     }
                                 }
+
                             } catch (error) {
                                 console.error(`Fehler beim Lesen von ${einsatzMdPath}: ${error.message}`);
                             }
@@ -651,7 +803,8 @@ class SoftwarePlanner extends Plugin {
                                 customerName: customer,
                                 folderName: deployment,
                                 completed: completed,
-                                preCheckDone: completed ? true : preCheckDone // if completed, preCheckDone doesn't matter
+                                preCheckDone: completed ? true : preCheckDone,
+                                kurzbeschrieb: kurzbeschrieb // Store the extracted type here
                             });
                         }
 
@@ -662,9 +815,6 @@ class SoftwarePlanner extends Plugin {
         }
         return deploymentDates;
     }
-
-
-
 
 
     getRemoteDates() {
@@ -692,58 +842,6 @@ class SoftwarePlanner extends Plugin {
         return remoteDates;
     }
 
-    // Methoden zum Erstellen von Einsätzen oder Remote-Tagen mit vorgegebenem Datum
-    async createNewDeploymentWithDate(deploymentDate) {
-        if (!this.settings.deploymentTemplatePath || !this.settings.customerDestinationPath) {
-            new Notice('Setze die Einsatzvorlage und den Kundenzielpfad in den Einstellungen.');
-            return;
-        }
-
-        const customers = getExistingFolders(path.join(this.app.vault.adapter.basePath, this.settings.customerDestinationPath));
-
-        const customerName = await this.promptDropdown(
-            'Kunden wählen',
-            customers,
-            false,
-            null,
-            true, // allowNewCustomer
-            async (newCustomerName) => {
-                await this.createNewCustomerWithName(newCustomerName);
-            }
-        );
-        if (!customerName) return;
-
-        const deploymentDates = await this.promptDateRange('Startdatum des Einsatzes angeben (YYYY-MM-DD)', deploymentDate);
-        if (!deploymentDates) return;
-
-        const folderName = deploymentDates.endDate
-            ? `${deploymentDates.startDate} - ${deploymentDates.endDate}`
-            : deploymentDates.startDate;
-
-        const customerPath = path.join(
-            this.app.vault.adapter.basePath,
-            this.settings.customerDestinationPath,
-            customerName,
-            '1. Einsätze',
-            folderName
-        );
-        const templatePath = path.join(this.app.vault.adapter.basePath, this.settings.deploymentTemplatePath);
-
-        try {
-            await copyFolder(templatePath, customerPath);
-            await this.updateEinsatzMd(path.join(customerPath, 'Einsatz.md'), customerName, deploymentDates.startDate);
-            new Notice(`Einsatz erstellt für ${customerName} vom ${folderName}`);
-        } catch (error) {
-            console.error(`Fehler beim Erstellen des Einsatzes: ${error.message}`);
-            new Notice(`Fehler beim Erstellen des Einsatzes: ${error.message}`);
-        }
-
-        if (this.calendarModalInstance) {
-            this.calendarModalInstance.refreshCalendar();
-        }
-    }
-
-
     async createNewRemoteDayWithDate(remoteDay) {
         if (!this.settings.remoteDayTemplatePath || !this.settings.remoteDayDestinationPath) {
             new Notice('Setze die Remote-Tag Vorlage- und Zielpfäde in den Einstellungen.');
@@ -767,23 +865,18 @@ class SoftwarePlanner extends Plugin {
             new Notice(`Fehler beim Erstellen des Remote-Tag Ordners: ${error.message}`);
         }
 
-        // Aktualisiere den Kalender, falls er geöffnet ist
         if (this.calendarModalInstance) {
             this.calendarModalInstance.refreshCalendar();
         }
     }
 
-    // Methode zum Öffnen des CreateActionModals
     openCreateModal(dateStr) {
         const modal = new ChooseActionModal(this.app, dateStr, this);
         modal.open();
     }
 
     async openDeploymentFile(deployment) {
-        // Basis-Pfad zum Vault
         const baseVaultPath = this.app.vault.adapter.basePath;
-
-        // Pfad zum Einsatzordner korrekt konstruieren
         const deploymentFolderPath = path.join(
             baseVaultPath,
             this.settings.customerDestinationPath,
@@ -792,77 +885,54 @@ class SoftwarePlanner extends Plugin {
             deployment.folderName
         );
 
-        // Pfad zur Datei 'Einsatz.md' im Einsatzordner
         const deploymentFilePath = path.join(deploymentFolderPath, 'Einsatz.md');
 
-        // Überprüfen, ob 'Einsatz.md' existiert
         if (!fs.existsSync(deploymentFilePath)) {
             new Notice('Einsatz.md existiert nicht.');
             return;
         }
 
-        // Pfad relativ zum Vault erhalten
         const filePathInVault = path.relative(baseVaultPath, deploymentFilePath).replace(/\\/g, '/');
-
-        // Datei in Obsidian abrufen
         const file = this.app.vault.getAbstractFileByPath(filePathInVault);
 
         if (file && file instanceof TFile) {
-            // Datei in neuem Tab öffnen
             await this.app.workspace.getLeaf().openFile(file);
 
-            // Kalenderansicht schließen
             if (this.calendarModalInstance) {
                 this.calendarModalInstance.close();
-                this.calendarModalInstance = null; // Optional: Instanz auf null setzen
+                this.calendarModalInstance = null;
             }
         } else {
             new Notice('Einsatz.md nicht gefunden.');
         }
     }
 
-
     async openRemoteSchedule(dateStr) {
-        // Basis-Pfad zum Vault
         const baseVaultPath = this.app.vault.adapter.basePath;
-
-        // Pfad zum Remote-Tag Basisordner
         const remoteDayBasePath = path.join(baseVaultPath, this.settings.remoteDayDestinationPath);
 
-        // Pfad zum Remote-Tag Ordner
         let remoteDayPath = path.join(remoteDayBasePath, dateStr);
-
-        // Pfad zur Datei 'Zeitplan.md' im Remote-Tag Ordner
         let scheduleFilePath = path.join(remoteDayPath, 'Zeitplan.md');
 
-        // Überprüfen, ob 'Zeitplan.md' existiert
         if (!fs.existsSync(scheduleFilePath)) {
-            // Wenn nicht, im '_Archiv'-Ordner nachsehen
             remoteDayPath = path.join(remoteDayBasePath, '_Archiv', dateStr);
             scheduleFilePath = path.join(remoteDayPath, 'Zeitplan.md');
         }
 
-        // Endgültige Überprüfung, ob 'Zeitplan.md' existiert
         if (!fs.existsSync(scheduleFilePath)) {
             new Notice('Zeitplan.md existiert nicht.');
             return;
         }
 
-        // Pfad relativ zum Vault erhalten
         const filePathInVault = path.relative(baseVaultPath, scheduleFilePath).replace(/\\/g, '/');
-
-
-        // Datei in Obsidian abrufen
         const file = this.app.vault.getAbstractFileByPath(filePathInVault);
 
         if (file && file instanceof TFile) {
-            // Datei in neuem Tab öffnen
             await this.app.workspace.getLeaf().openFile(file);
 
-            // Kalenderansicht schließen
             if (this.calendarModalInstance) {
                 this.calendarModalInstance.close();
-                this.calendarModalInstance = null; // Optional: Instanz auf null setzen
+                this.calendarModalInstance = null;
             }
         } else {
             new Notice('Zeitplan.md nicht gefunden.');
@@ -887,7 +957,6 @@ class SoftwarePlanner extends Plugin {
         }
     }
 
-    // Utility function to add task to schedule
     async addTaskToSchedule(schedulePath, taskName) {
         let scheduleContent = await fs.promises.readFile(schedulePath, 'utf8');
         const taskSection = '## Aufträge\n\n';
@@ -896,19 +965,14 @@ class SoftwarePlanner extends Plugin {
             throw new Error('Aufgabenabschnitt nicht in Zeitplan gefunden');
         }
 
-        // Berechne den relativen Pfad zur Auftrag.md Datei
         const scheduleDir = path.dirname(schedulePath);
         const taskFolderPath = path.join(scheduleDir, taskName);
         const taskFilePath = path.join(taskFolderPath, 'Auftrag.md');
 
-        // Berechne den Pfad relativ zum Vault
         const vaultPath = this.app.vault.adapter.basePath;
         const relativePath = path.relative(vaultPath, taskFilePath).replace(/\\/g, '/');
 
-        // Erstelle den Link
         const taskEntry = `- [ ] [[${relativePath}|${taskName}]]\n`;
-
-        // Füge den Link in den Zeitplan ein
         scheduleContent = scheduleContent.slice(0, insertIndex) + taskEntry + scheduleContent.slice(insertIndex);
         await fs.promises.writeFile(schedulePath, scheduleContent, 'utf8');
     }
@@ -920,14 +984,12 @@ class SoftwarePlanner extends Plugin {
             return;
         }
 
-        // Schritt 1: Auftragsnamen abfragen
         const taskName = await this.promptUser('Auftragsnamen eingeben');
         if (!taskName) {
             new Notice('Kein Auftragsnamen eingegeben.');
             return;
         }
 
-        // Schritt 2: Pfade definieren
         if (!this.settings.remoteDayDestinationPath) {
             new Notice('Remote Tag Zielverzeichnis Pfad ist nicht gesetzt. Bitte überprüfen Sie die Einstellungen.');
             return;
@@ -939,10 +1001,9 @@ class SoftwarePlanner extends Plugin {
         const taskFilePath = path.join(remoteTaskPath, 'Auftrag.md');
         const taskFileTemplatePath = path.join(templatePath, 'Auftrag.md');
 
-        // Schritt 3: Erstellen des Auftrag-Ordners und der Datei
         try {
             await copyFolder(templatePath, remoteTaskPath);
-            await this.addTaskToSchedule(schedulePath, taskName); // Anpassung hier
+            await this.addTaskToSchedule(schedulePath, taskName);
             await createUpdatedTaskFile(taskFileTemplatePath, taskFilePath, taskName);
             new Notice(`Remote Auftragsordner erstellt für "${taskName}" am ${date}`);
         } catch (error) {
@@ -952,16 +1013,13 @@ class SoftwarePlanner extends Plugin {
     }
 
     isScheduleFile(file) {
-        // Prüfen, ob die Datei 'Zeitplan.md' ist und sich im Remote-Tag Ordner befindet
-        const remoteDayPath = this.settings.remoteDayDestinationPath.replace(/\\/g, '/'); // Windows Pfade anpassen
-        const escapedPath = remoteDayPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); // Regex-Sonderzeichen escapen
+        const remoteDayPath = this.settings.remoteDayDestinationPath.replace(/\\/g, '/');
+        const escapedPath = remoteDayPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         const regex = new RegExp(`^${escapedPath}/\\d{4}-\\d{2}-\\d{2}/Zeitplan\\.md$`);
         return regex.test(file.path);
     }
 
-
     getDateFromScheduleFile(file) {
-        // Extrahieren des Datums aus dem Pfad, z.B. 'Remote-Tage/2024-10-01/Zeitplan.md'
         const parts = file.path.split('/');
         if (parts.length < 3) {
             console.error('Ungültiger Pfad für Zeitplan.md:', file.path);
@@ -971,23 +1029,18 @@ class SoftwarePlanner extends Plugin {
         return remoteDayFolder;
     }
 
-
     addNeuerAuftragButton(date) {
-        // Entfernt den bestehenden Button, falls vorhanden
         this.removeNeuerAuftragButton();
 
         this.neuerAuftragButton = this.addStatusBarItem('statusbar-right');
         this.neuerAuftragButton.setText('Neuer Auftrag');
         this.neuerAuftragButton.setAttr('aria-label', 'Neuen Auftrag erstellen');
-        this.neuerAuftragButton.addClass('neuer-auftrag-statusbar-button'); // Für eventuelles CSS Styling
+        this.neuerAuftragButton.addClass('neuer-auftrag-statusbar-button');
 
-        // Korrigierte Event-Zuweisung mit 'addEventListener'
         this.neuerAuftragButton.addEventListener('click', () => {
             this.createNewRemoteTaskFromSchedule(date);
         });
     }
-
-
 
     removeNeuerAuftragButton() {
         if (this.neuerAuftragButton) {
@@ -1099,7 +1152,6 @@ class DateRangePromptModal extends Modal {
         const startInputEl = containerEl.createEl('input', { type: 'date', cls: 'date-input' });
         startInputEl.focus();
 
-        // Setze das vorbefüllte Startdatum, falls vorhanden
         if (this.defaultStartDate) {
             startInputEl.value = this.defaultStartDate;
         }
@@ -1117,15 +1169,12 @@ class DateRangePromptModal extends Modal {
         const multiDayCheckboxEl = multiDayContainer.createEl('input', { type: 'checkbox', cls: 'multi-day-checkbox' });
         multiDayCheckboxEl.id = 'multiDayCheckbox';
 
-        // Setze den Standardwert für die Mehrtägig-Checkbox
         multiDayCheckboxEl.checked = this.defaultMultiDay;
 
         const multiDayLabelEl = multiDayContainer.createEl('label', { text: 'Mehrtägig', cls: 'multi-day-label' });
         multiDayLabelEl.htmlFor = 'multiDayCheckbox';
 
         const endInputEl = containerEl.createEl('input', { type: 'date', cls: 'date-input' });
-
-        // Zeige das Enddatum-Feld nur an, wenn die Checkbox ausgewählt ist
         endInputEl.style.display = this.defaultMultiDay ? 'block' : 'none';
 
         multiDayCheckboxEl.addEventListener('change', () => {
@@ -1153,7 +1202,6 @@ class DateRangePromptModal extends Modal {
             this.close();
         });
 
-        // Elemente zum Container hinzufügen
         multiDayContainer.appendChild(multiDayLabelEl);
         containerEl.appendChild(multiDayContainer);
         containerEl.appendChild(endInputEl);
@@ -1168,7 +1216,6 @@ class DateRangePromptModal extends Modal {
     }
 }
 
-// DropdownModal class
 class DropdownModal extends Modal {
     constructor(app, promptText, options, callback, showTodayButton = false, validateTodayCallback = null, allowNewCustomer = false, createNewCustomerCallback = null) {
         super(app);
@@ -1185,10 +1232,8 @@ class DropdownModal extends Modal {
         const { contentEl } = this;
         contentEl.createEl('h2', { text: this.promptText });
 
-        // Create container for input and dropdown
         const containerEl = contentEl.createEl('div', { cls: 'dropdown-container' });
 
-        // Optional 'Heute' Button
         if (this.showTodayButton) {
             const todayButtonEl = containerEl.createEl('button', { text: 'Heute', cls: 'dropdown-button' });
             todayButtonEl.addEventListener('click', () => {
@@ -1202,27 +1247,22 @@ class DropdownModal extends Modal {
             });
         }
 
-        // Create input element
         const inputEl = containerEl.createEl('input', { type: 'text', cls: 'dropdown-input' });
         inputEl.focus();
 
-        // Create dropdown element
         const dropdownEl = containerEl.createEl('select', { cls: 'dropdown' });
         dropdownEl.size = this.options.length > 10 ? 10 : this.options.length;
 
-        // Erstellen der Dropdown-Optionen
         this.options.forEach(option => {
             const optionEl = dropdownEl.createEl('option', { text: option });
             optionEl.value = option;
 
-            // Add double-click event listener
             optionEl.addEventListener('dblclick', () => {
                 this.callback(optionEl.value);
                 this.close();
             });
         });
 
-        // Filter options based on input
         inputEl.addEventListener('input', () => {
             const filter = inputEl.value.toLowerCase();
             let firstVisibleOption = null;
@@ -1243,21 +1283,20 @@ class DropdownModal extends Modal {
             dropdownEl.size = visibleOptionsCount > 10 ? 10 : visibleOptionsCount;
         });
 
-        // Handle keydown events for better navigation
         dropdownEl.addEventListener('keydown', (event) => {
             if (event.key === 'Enter') {
-                event.preventDefault(); // Prevent form submission
+                event.preventDefault();
                 this.callback(dropdownEl.value);
                 this.close();
             } else if (event.key === 'Tab') {
-                event.preventDefault(); // Prevent tabbing out of the modal
-                inputEl.focus(); // Bring focus back to the input
+                event.preventDefault();
+                inputEl.focus();
             }
         });
 
         inputEl.addEventListener('keydown', (event) => {
             if (event.key === 'Enter') {
-                event.preventDefault(); // Prevent form submission
+                event.preventDefault();
                 if (dropdownEl.options.length > 0) {
                     this.callback(dropdownEl.value);
                     this.close();
@@ -1268,10 +1307,8 @@ class DropdownModal extends Modal {
             }
         });
 
-        // Append elements to contentEl
         contentEl.appendChild(containerEl);
 
-        // Neuen Kunden erstellen Button hinzufügen, falls erlaubt
         if (this.allowNewCustomer) {
             const newCustomerButton = contentEl.createEl('button', { text: 'Neuen Kunden erstellen', cls: 'new-customer-button' });
             newCustomerButton.addEventListener('click', () => {
@@ -1280,18 +1317,13 @@ class DropdownModal extends Modal {
         }
     }
 
-    // Methode zum Öffnen des Modals für neuen Kundennamen
     openNewCustomerModal() {
         const modal = new PromptModal(this.app, 'Neuen Kundennamen eingeben', async (newCustomerName) => {
             if (newCustomerName) {
-                // Erstelle neuen Kunden
                 if (this.createNewCustomerCallback) {
                     await this.createNewCustomerCallback(newCustomerName);
-                    // Aktualisiere die Optionen mit dem neuen Kunden
                     this.options.push(newCustomerName);
-                    // Aktualisiere das Dropdown
                     this.refreshDropdown();
-                    // Setze den neuen Kunden als ausgewählt
                     this.callback(newCustomerName);
                     this.close();
                 } else {
@@ -1304,16 +1336,14 @@ class DropdownModal extends Modal {
         modal.open();
     }
 
-    // Methode zum Aktualisieren des Dropdowns
     refreshDropdown() {
         const dropdownEl = this.contentEl.querySelector('.dropdown');
-        dropdownEl.innerHTML = ''; // Entferne alte Optionen
+        dropdownEl.innerHTML = '';
 
         this.options.forEach(option => {
             const optionEl = dropdownEl.createEl('option', { text: option });
             optionEl.value = option;
 
-            // Add double-click event listener
             optionEl.addEventListener('dblclick', () => {
                 this.callback(optionEl.value);
                 this.close();
@@ -1327,7 +1357,6 @@ class DropdownModal extends Modal {
     }
 }
 
-// ConfirmPromptModal class
 class ConfirmPromptModal extends Modal {
     constructor(app, promptText, callback) {
         super(app);
@@ -1360,7 +1389,6 @@ class ConfirmPromptModal extends Modal {
     }
 }
 
-// ConfirmModal class
 class ConfirmModal extends Modal {
     constructor(app, promptText, callback) {
         super(app);
@@ -1385,32 +1413,27 @@ class ConfirmModal extends Modal {
     }
 }
 
-// Neue Klasse 'CalendarModal' hinzufügen
 class CalendarModal extends Modal {
     constructor(app, plugin) {
         super(app);
         this.plugin = plugin;
-        this.currentDate = new Date(); // Startdatum ist das aktuelle Datum
-        this.highlightedDate = null; // Für das zweite Feature
+        this.currentDate = new Date();
+        this.highlightedDate = null;
     }
 
     onOpen() {
         const { contentEl } = this;
         contentEl.empty();
 
-        // Modal-Größe anpassen
-        this.modalEl.style.width = '80%'; // Setzt die Breite auf 80% des Viewports
-        this.modalEl.style.height = '80%'; // Setzt die Höhe auf 80% des Viewports
+        this.modalEl.style.width = '80%';
+        this.modalEl.style.height = '80%';
 
         contentEl.style.width = '100%';
         contentEl.style.height = '100%';
         contentEl.style.display = 'flex';
         contentEl.style.flexDirection = 'column';
-
-        // Fügt oben einen Abstand hinzu
         contentEl.style.paddingTop = '20px';
 
-        // Navigations-Buttons erstellen
         const navContainer = contentEl.createEl('div', { cls: 'calendar-nav' });
 
         const prevButton = navContainer.createEl('button', { text: '← Vorherige 4 Monate', cls: 'prev-button' });
@@ -1419,11 +1442,10 @@ class CalendarModal extends Modal {
             this.renderCalendar();
         });
 
-        // Heute-Button hinzufügen
         const todayButton = navContainer.createEl('button', { text: 'Heute', cls: 'today-button' });
         todayButton.addEventListener('click', () => {
             this.currentDate = new Date();
-            this.highlightedDate = null; // Highlight entfernen
+            this.highlightedDate = null;
             this.renderCalendar();
         });
 
@@ -1433,7 +1455,6 @@ class CalendarModal extends Modal {
             this.renderCalendar();
         });
 
-        // Datumssuche erstellen
         const searchContainer = contentEl.createEl('div', { cls: 'calendar-search' });
         const searchInput = searchContainer.createEl('input', { type: 'date' });
         const searchButton = searchContainer.createEl('button', { text: 'Springe zu Datum' });
@@ -1441,7 +1462,7 @@ class CalendarModal extends Modal {
             const selectedDate = new Date(searchInput.value);
             if (!isNaN(selectedDate)) {
                 this.currentDate = selectedDate;
-                this.highlightedDate = selectedDate; // Datum zum Hervorheben setzen
+                this.highlightedDate = selectedDate;
                 this.renderCalendar();
             }
         });
@@ -1455,7 +1476,6 @@ class CalendarModal extends Modal {
         const { calendarContainer } = this;
         calendarContainer.empty();
 
-        // Einsätze und Remote-Tage abrufen
         const deployments = this.plugin.getDeploymentDates();
         const remoteDays = this.plugin.getRemoteDates();
 
@@ -1468,15 +1488,13 @@ class CalendarModal extends Modal {
 
             const daysEl = monthEl.createEl('div', { cls: 'calendar-days' });
 
-            // Ersten Tag der Anzeige berechnen (Anfang der Woche, Montag = 0)
             const firstDayOfMonth = new Date(Date.UTC(monthDate.getUTCFullYear(), monthDate.getUTCMonth(), 1));
-            const firstDayWeekday = (firstDayOfMonth.getUTCDay() + 6) % 7; // Montag = 0
+            const firstDayWeekday = (firstDayOfMonth.getUTCDay() + 6) % 7;
             const displayStartDate = new Date(firstDayOfMonth);
             displayStartDate.setUTCDate(displayStartDate.getUTCDate() - firstDayWeekday);
 
-            // Letzten Tag der Anzeige berechnen (Ende der Woche)
             const lastDayOfMonth = new Date(Date.UTC(monthDate.getUTCFullYear(), monthDate.getUTCMonth() + 1, 0));
-            const lastDayWeekday = (lastDayOfMonth.getUTCDay() + 6) % 7; // Montag = 0
+            const lastDayWeekday = (lastDayOfMonth.getUTCDay() + 6) % 7;
             const displayEndDate = new Date(lastDayOfMonth);
             displayEndDate.setUTCDate(displayEndDate.getUTCDate() + (6 - lastDayWeekday));
 
@@ -1486,20 +1504,17 @@ class CalendarModal extends Modal {
                 const dateStr = currentDate.toISOString().split('T')[0];
                 const dayEl = daysEl.createEl('div', { cls: 'calendar-day' });
 
-                // Tageszahl anzeigen
                 const dayNumberEl = dayEl.createEl('div', { text: currentDate.getUTCDate().toString(), cls: 'day-number' });
 
-                // Überprüfen, ob es heute ist
                 const today = new Date();
                 const isToday = currentDate.getUTCFullYear() === today.getFullYear() &&
-                                currentDate.getUTCMonth() === today.getMonth() &&
-                                currentDate.getUTCDate() === today.getDate();
+                                currentDate.getUTCMonth() === today.getUTCMonth() &&
+                                currentDate.getUTCDate() === today.getUTCDate();
 
                 if (isToday) {
                     dayEl.addClass('today');
                 }
 
-                // Überprüfen, ob es das hervorgehobene Datum ist
                 if (this.highlightedDate) {
                     const isHighlighted = currentDate.getUTCFullYear() === this.highlightedDate.getUTCFullYear() &&
                                           currentDate.getUTCMonth() === this.highlightedDate.getUTCMonth() &&
@@ -1509,22 +1524,18 @@ class CalendarModal extends Modal {
                     }
                 }
 
-                // Tage, die nicht zum aktuellen Monat gehören, markieren
                 if (currentDate.getUTCMonth() !== monthDate.getUTCMonth()) {
                     dayEl.addClass('other-month');
                 }
 
-                // Prüfen, ob Wochenende
-                const dayOfWeek = currentDate.getUTCDay(); // Sonntag = 0, Montag = 1, ..., Samstag = 6
+                const dayOfWeek = currentDate.getUTCDay();
                 if (dayOfWeek === 0 || dayOfWeek === 6) {
                     dayNumberEl.addClass('weekend');
                 }
 
-                // Prüfen, ob das Datum Termine hat
                 const dayDeployments = deployments[dateStr] || [];
                 const isRemoteDay = remoteDays[dateStr];
 
-                // Termine anzeigen
                 if (dayDeployments.length > 0 || isRemoteDay) {
                     const eventsEl = dayEl.createEl('div', { cls: 'day-events' });
 
@@ -1536,15 +1547,11 @@ class CalendarModal extends Modal {
                     for (const deployment of dayDeployments) {
                         let eventClass;
                         if (deployment.completed) {
-                            // Green
                             eventClass = 'deployment-completed-event';
                         } else {
-                            // Not completed, check preCheckDone
                             if (deployment.preCheckDone) {
-                                // Blue
                                 eventClass = 'deployment-event';
                             } else {
-                                // Orange
                                 eventClass = 'deployment-new-event';
                             }
                         }
@@ -1558,29 +1565,20 @@ class CalendarModal extends Modal {
 
                 dayEl.addEventListener('click', () => {
                     if (dayDeployments.length > 0 || isRemoteDay) {
-                        // Wenn es bereits Termine gibt, zeige die Informationen an
                         this.openDayInfoModal(dateStr);
                     } else {
-                        // Ansonsten öffne das Modal zum Erstellen eines neuen Termins
                         this.openCreateModal(dateStr);
                     }
                 });
 
-                // Zum nächsten Tag wechseln
                 currentDate.setUTCDate(currentDate.getUTCDate() + 1);
             }
         }
     }
 
-
-
-
     openCreateModal(dateStr) {
-        // Benutzer fragen, ob ein Einsatz oder ein Remote-Tag erstellt werden soll
         const modal = new ChooseActionModal(this.app, dateStr, this.plugin);
         modal.open();
-
-        // Nach Schließen des Modals den Kalender aktualisieren
         modal.onClose = () => {
             this.renderCalendar();
         };
@@ -1601,7 +1599,6 @@ class CalendarModal extends Modal {
     }
 }
 
-// Modal zum Auswählen der Aktion beim Klicken auf einen Tag
 class ChooseActionModal extends Modal {
     constructor(app, dateStr, plugin) {
         super(app);
@@ -1613,7 +1610,7 @@ class ChooseActionModal extends Modal {
         const { contentEl } = this;
         contentEl.empty();
 
-        contentEl.addClass('choose-action-modal'); // Neue Klasse hinzufügen
+        contentEl.addClass('choose-action-modal');
 
         contentEl.createEl('h2', { text: 'Aktion wählen' });
         contentEl.createEl('p', { text: `Datum: ${this.dateStr}` });
@@ -1650,27 +1647,22 @@ class DayInfoModal extends Modal {
         const { contentEl } = this;
         contentEl.empty();
 
-        contentEl.addClass('day-info-modal'); // Neue Klasse hinzufügen
+        contentEl.addClass('day-info-modal');
 
         contentEl.createEl('h2', { text: 'Termin-Informationen' });
         contentEl.createEl('p', { text: `Datum: ${this.dateStr}` });
 
-        // Informationen sammeln
         const deployments = this.plugin.getDeploymentDates()[this.dateStr] || [];
         const isRemoteDay = this.plugin.getRemoteDates()[this.dateStr];
 
-        // Anzeige der Informationen
         const infoEl = contentEl.createEl('div', { cls: 'info-text' });
 
-        // Buttons für Aktionen
         const buttonContainer = contentEl.createEl('div', { cls: 'button-container' });
 
         if (isRemoteDay) {
-            // Remote-Tag Informationen anzeigen
-            const remoteInfo = '- **Typ:** Remote-Tag';
+            const remoteInfo = '- **Typ:** Remote';
             await MarkdownRenderer.renderMarkdown(remoteInfo, infoEl, '', this);
 
-            // Button zum Öffnen von Zeitplan.md hinzufügen
             const openScheduleButton = buttonContainer.createEl('button', { text: 'Remote-Zeitplan öffnen' });
             openScheduleButton.addEventListener('click', async () => {
                 await this.plugin.openRemoteSchedule(this.dateStr);
@@ -1679,11 +1671,9 @@ class DayInfoModal extends Modal {
         }
 
         for (const deployment of deployments) {
-            // Einsatzinformationen anzeigen
-            const deploymentInfo = `- **Typ:** Einsatz\n  **Kunde:** ${deployment.customerName}\n  **Einsatzdaten:** ${deployment.folderName}`;
+            const deploymentInfo = `- **Typ:** Einsatz\n  **Kunde:** ${deployment.customerName}\n  **Kurzbeschrieb:** ${deployment.kurzbeschrieb}\n  **Einsatzdaten:** ${deployment.folderName}`;
             await MarkdownRenderer.renderMarkdown(deploymentInfo, infoEl, '', this);
 
-            // Button zum Öffnen des Einsatzordners hinzufügen
             const openDeploymentButton = buttonContainer.createEl('button', { text: `Zum Einsatz von ${deployment.customerName}` });
             openDeploymentButton.addEventListener('click', async () => {
                 await this.plugin.openDeploymentFile(deployment);
@@ -1691,14 +1681,12 @@ class DayInfoModal extends Modal {
             });
         }
 
-        // Neuen Termin erstellen Button hinzufügen
         const newEventButton = buttonContainer.createEl('button', { text: 'Neuen Termin erstellen' });
         newEventButton.addEventListener('click', () => {
             this.close();
             this.plugin.openCreateModal(this.dateStr);
         });
 
-        // Schließen Button hinzufügen
         const closeButton = buttonContainer.createEl('button', { text: 'Schließen' });
         closeButton.addEventListener('click', () => {
             this.close();
@@ -1711,12 +1699,8 @@ class DayInfoModal extends Modal {
     }
 }
 
-
-// CSS-Stile hinzufügen
 const style = document.createElement('style');
 style.textContent = `
-    /* CSS-Stile */
-
 .date-container {
     display: flex;
     flex-direction: column;
@@ -1773,38 +1757,32 @@ style.textContent = `
 
 .calendar-nav {
     display: flex;
-    justify-content: center; /* Zentriert die Buttons horizontal */
-    align-items: center; /* Zentriert die Buttons vertikal */
+    justify-content: center;
+    align-items: center;
     margin-bottom: 10px;
-    margin-top: 20px; /* Fügt oben einen Abstand hinzu */
+    margin-top: 20px;
 }
 
 .calendar-nav button {
-    flex: none; /* Verhindert, dass die Buttons sich dehnen */
+    flex: none;
     margin: 0 10px;
 }
 
 .calendar-nav .today-button {
-    width: 80px; /* Feste Breite für den Heute-Button */
+    width: 80px;
 }
 
 .calendar-nav .prev-button,
 .calendar-nav .next-button {
-    width: 150px; /* Feste Breite für die Monats-Buttons */
+    width: 150px;
 }
 
-.calendar-nav button:nth-child(2) { /* Heute-Button */
-    flex: none;
-}
-
-/* Hervorgehobenes Datum nach "Springe zu Datum" */
 .calendar-day.highlighted-date {
     border: 2px solid lightgray;
     border-radius: 5px;
     box-sizing: border-box;
 }
 
-/* Kalender-Suche */
 .calendar-search {
     display: flex;
     margin-bottom: 10px;
@@ -1814,30 +1792,27 @@ style.textContent = `
     margin-right: 5px;
 }
 
-/* Kalender-Container */
 .calendar-container {
     display: grid;
-    grid-template-columns: repeat(2, 1fr); /* 2 Spalten */
-    grid-gap: 20px; /* Abstand zwischen den Monaten */
+    grid-template-columns: repeat(2, 1fr);
+    grid-gap: 20px;
     width: 100%;
-    flex-grow: 1; /* Kalender füllt den verfügbaren Platz */
-    overflow-y: auto; /* Scrollen bei Bedarf */
+    flex-grow: 1;
+    overflow-y: auto;
 }
 
-/* Kalender-Monat */
 .calendar-month {
     box-sizing: border-box;
     padding: 10px;
 }
 
-/* Kalender-Tage */
 .calendar-days {
     display: flex;
     flex-wrap: wrap;
 }
 
 .calendar-day {
-    width: 14.28%; /* Jede Woche hat 7 Tage */
+    width: 14.28%;
     box-sizing: border-box;
     padding: 8px;
     text-align: center;
@@ -1866,27 +1841,22 @@ style.textContent = `
     display: inline-block;
 }
 
-/* Tageszahl für Samstage und Sonntage grau darstellen */
 .day-number.weekend {
     color: dimgray;
 }
 
-/* Tage aus anderen Monaten blasser darstellen */
 .calendar-day.other-month {
     color: gray
 }
 
-/* Kalender-Tageszahl */
 .day-number {
     font-weight: bold;
 }
 
-/* Tagesereignisse */
 .day-events {
     margin-top: 5px;
 }
 
-/* Einzelnes Ereignis */
 .event {
     font-size: 10px;
     margin-top: 2px;
@@ -1895,7 +1865,6 @@ style.textContent = `
     color: white;
 }
 
-/* Stil für Einsatz-Ereignis */
 .deployment-new-event {
     background-color: orange;
 }
@@ -1905,24 +1874,13 @@ style.textContent = `
 }
 
 .deployment-completed-event {
-    background-color: #28a745; /* Grün */
+    background-color: #28a745;
 }
 
-/* Stil für Remote-Ereignis */
 .remote-event {
     background-color: #C71585;
 }
 
-/* Modal-Buttons Abstand */
-.choose-action-modal .button-container {
-    display: flex;
-    flex-direction: column;
-    align-items: stretch;
-    margin 5px;
-    margin-top: 20px;
-}
-
-/* Modal-Buttons Abstand */
 .choose-action-modal .button-container {
     display: flex;
     flex-direction: column;
@@ -1931,13 +1889,12 @@ style.textContent = `
 }
 
 .choose-action-modal .button-container button {
-    margin: 5px 0; /* Fügt oben und unten Abstand hinzu */
+    margin: 5px 0;
     padding: 10px;
     width: 100%;
     box-sizing: border-box;
 }
 
-/* Button zum Erstellen eines neuen Kunden */
 .new-customer-button {
     margin-top: 10px;
     padding: 5px 10px;
@@ -1953,13 +1910,12 @@ style.textContent = `
 }
 
 .day-info-modal .info-text {
-    white-space: pre-wrap; /* Zeilenumbrüche berücksichtigen */
+    white-space: pre-wrap;
     margin-top: 10px;
 }
 
-/* Größe des Modals anpassen */
 .modal-container {
-    max-width: none; /* Entfernt die maximale Breite */
+    max-width: none;
     width: 100%;
     height: 100%;
 }
