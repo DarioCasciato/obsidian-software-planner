@@ -1113,6 +1113,46 @@ class SoftwarePlanner extends Plugin
         await fs.promises.writeFile(schedulePath, scheduleContent, 'utf8');
     }
 
+    async openDeploymentFile(deployment)
+    {
+        const baseVaultPath = this.app.vault.adapter.basePath;
+        const deploymentFolderPath = path.join(
+            baseVaultPath,
+            this.settings.customerDestinationPath,
+            deployment.customerName,
+            '1. Einsätze',
+            deployment.folderName
+        );
+
+        const deploymentFilePath = path.join(deploymentFolderPath, 'Einsatz.md');
+
+        if (!fs.existsSync(deploymentFilePath))
+        {
+            new Notice('Einsatz.md existiert nicht.');
+            return;
+        }
+
+        const filePathInVault = path.relative(baseVaultPath, deploymentFilePath).replace(/\\/g, '/');
+        const file = this.app.vault.getAbstractFileByPath(filePathInVault);
+
+        if (file && file instanceof TFile)
+        {
+            await this.app.workspace.getLeaf().openFile(file);
+
+            // Close calendar if open
+            if (this.calendarModalInstance)
+            {
+                this.calendarModalInstance.close();
+                this.calendarModalInstance = null;
+            }
+        }
+        else
+        {
+            new Notice('Einsatz.md nicht gefunden.');
+        }
+    }
+
+
     // #endregion
 }
 
