@@ -293,18 +293,12 @@ class SoftwarePlanner extends Plugin
         this.createRibbonIcons();
         this.addXMLFileExtension();
 
-        this.addCommand({
-            id: 'open-calendar',
-            name: 'Planner-Kalender öffnen',
-            callback: () => this.openCalendar()
-        });
-
-        this.addRibbonIcon('calendar', 'Planner-Kalender öffnen', () => this.openCalendar());
-
         this.calendarModalInstance = null;
         this.neuerAuftragButton = null;
 
         this.registerEvent(this.app.workspace.on('active-leaf-change', this.onActiveLeafChange.bind(this)));
+
+        this.checkWeeklyTasks();
     }
 
     onunload()
@@ -367,6 +361,12 @@ class SoftwarePlanner extends Plugin
             id: 'archive-remote-days',
             name: 'Remote-Tage Archivieren',
             callback: () => this.archiveOldRemoteDays()
+        });
+
+        this.addCommand({
+            id: 'open-calendar',
+            name: 'Planner-Kalender öffnen',
+            callback: () => this.openCalendar()
         });
     }
 
@@ -722,6 +722,78 @@ class SoftwarePlanner extends Plugin
     // #endregion
 
     // #region Archiving and Checking
+
+    checkWeeklyTasks()
+    {
+        const deploymentDates = this.getDeploymentDates();
+        const remoteDates = this.getRemoteDates();
+
+        const today = new Date();
+        let messages = [];
+        let anyTasks = false;
+
+        for (let i = 0; i < 7; i++)
+        {
+            const currentDate = new Date(today);
+            currentDate.setDate(today.getDate() + i);
+            const dateStr = currentDate.toISOString().split('T')[0];
+
+            // Determine the label for the day
+            let dayLabel;
+            if (i === 0)
+            {
+                dayLabel = 'Heute';
+            }
+            else if (i === 1)
+            {
+                dayLabel = 'Morgen';
+            }
+            else
+            {
+                dayLabel = dateStr;
+            }
+
+            // Gather tasks (deployments + possibly remote)
+            let events = [];
+
+            // Check deployments for this day
+            if (deploymentDates[dateStr])
+            {
+                // Add each customer name as an event
+                for (const dep of deploymentDates[dateStr])
+                {
+                    events.push(dep.customerName);
+                }
+            }
+
+            // Check if there's a remote day
+            if (remoteDates[dateStr])
+            {
+                // Treat remote day as a separate event named "Remote-Tag"
+                events.push('Remote-Tag');
+            }
+
+            // If we found events, add each on its own line
+            if (events.length > 0)
+            {
+                anyTasks = true;
+                for (const ev of events)
+                {
+                    messages.push(`- ${dayLabel}: ${ev}`);
+                }
+            }
+        }
+
+        // If no tasks were found for the entire week
+        if (!anyTasks)
+        {
+            messages.push('Keine Termine für diese Woche geplant.');
+        }
+
+        // Print the message as a Notice
+        const finalMessage = `Anstehende Termine:\n${messages.join('\n')}`;
+        new Notice(finalMessage);
+    }
 
     async archiveOldRemoteDays()
     {
