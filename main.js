@@ -15,7 +15,8 @@ const DEFAULT_SETTINGS = {
     deploymentTemplatePath: '',
     remoteTaskTemplatePath: '',
     xmlProgramPath: '',
-    deploymentTypesPath: ''
+    deploymentTypesPath: '',
+    remoteTypesPath: ''
 };
 
 // #endregion
@@ -198,11 +199,42 @@ class SoftwarePlannerSettingTab extends PluginSettingTab
                     }
                 }));
 
+
         // Remote Einstellungen
         containerEl.createEl('h3', { text: 'Remote Settings' });
         this.addPathSetting(containerEl, 'Remote Tag Vorlagenpfad', 'remoteDayTemplatePath');
         this.addPathSetting(containerEl, 'Remote Auftrag Vorlagenpfad', 'remoteTaskTemplatePath');
         this.addPathSetting(containerEl, 'Remote Tag Zielverzeichnis Pfad', 'remoteDayDestinationPath');
+
+        // Remote-Typen Verzeichnis
+        new Setting(containerEl)
+        .setName('Remote-Typen Verzeichnis')
+        .setDesc('Verzeichnis mit Dateien für verschiedene Remote-Typen')
+        .addText(text => text
+            .setPlaceholder('Pfad angeben')
+            .setValue(this.plugin.settings.remoteTypesPath || '')
+            .onChange(async (value) => {
+                this.plugin.settings.remoteTypesPath = value;
+                await this.plugin.saveSettings();
+            }))
+        .addButton(button => button
+            .setButtonText('Durchsuchen')
+            .setCta()
+            .onClick(async () => {
+                const result = await remote.dialog.showOpenDialog({
+                    properties: ['openDirectory']
+                });
+                if (!result.canceled)
+                {
+                    const selectedPath = result.filePaths[0];
+                    const vaultPath = this.app.vault.adapter.basePath;
+                    const relativePath = path.relative(vaultPath, selectedPath);
+
+                    this.plugin.settings.remoteTypesPath = relativePath;
+                    await this.plugin.saveSettings();
+                    this.display();
+                }
+            }));
 
         // XMLVisualizer Einstellungen
         containerEl.createEl('h3', { text: 'XMLVisualizer Einstellungen' });
@@ -537,9 +569,6 @@ class SoftwarePlanner extends Plugin
             await copyFolder(templatePath, remoteDayPath);
             new Notice(`Remote-Tag erstellt: ${dateStr}`);
 
-            const scheduleFilePath = path.join(remoteDayPath, 'Zeitplan.md');
-            await this.openFile(scheduleFilePath);
-
             this.onActiveLeafChange();
         }
         catch (error)
@@ -598,6 +627,14 @@ class SoftwarePlanner extends Plugin
         const taskName = await this.promptUser('Auftragsnamen eingeben');
         if (!taskName) return;
 
+        // NEW: Prompt for remote type
+        const remoteTypeData = await this.promptRemoteType();
+        if (!remoteTypeData)
+        {
+            new Notice('Kein Remote-Typ gewählt.');
+            return;
+        }
+
         const remoteTaskPath = path.join(this.app.vault.adapter.basePath, this.settings.remoteDayDestinationPath, remoteDay, taskName);
         const templatePath = path.join(this.app.vault.adapter.basePath, this.settings.remoteTaskTemplatePath);
         const schedulePath = path.join(this.app.vault.adapter.basePath, this.settings.remoteDayDestinationPath, remoteDay, 'Zeitplan.md');
@@ -608,7 +645,13 @@ class SoftwarePlanner extends Plugin
         {
             await copyFolder(templatePath, remoteTaskPath);
             await this.addTaskToSchedule(schedulePath, taskName);
-            await createUpdatedTaskFile(taskFileTemplatePath, taskFilePath, taskName);
+
+            // Replace Title and Checklist placeholders in Auftrag.md
+            let auftragContent = await fs.promises.readFile(taskFileTemplatePath, 'utf8');
+            auftragContent = auftragContent.replace('[Title]', remoteTypeData.title);
+            auftragContent = auftragContent.replace('[Checklist]', remoteTypeData.checklist);
+            await fs.promises.writeFile(taskFilePath, auftragContent, 'utf8');
+
             new Notice(`Remote Auftragsordner erstellt für ${taskName} am ${remoteDay}`);
         }
         catch (error)
@@ -617,6 +660,7 @@ class SoftwarePlanner extends Plugin
             new Notice(`Fehler beim Erstellen des Remote Auftrags: ${error.message}`);
         }
     }
+
 
     async createNewRemoteTaskFromSchedule(date)
     {
@@ -640,6 +684,14 @@ class SoftwarePlanner extends Plugin
             return;
         }
 
+        // NEW: Prompt for remote type
+        const remoteTypeData = await this.promptRemoteType();
+        if (!remoteTypeData)
+        {
+            new Notice('Kein Remote-Typ gewählt.');
+            return;
+        }
+
         const remoteTaskPath = path.join(this.app.vault.adapter.basePath, this.settings.remoteDayDestinationPath, date, taskName);
         const templatePath = path.join(this.app.vault.adapter.basePath, this.settings.remoteTaskTemplatePath);
         const schedulePath = path.join(this.app.vault.adapter.basePath, this.settings.remoteDayDestinationPath, date, 'Zeitplan.md');
@@ -650,7 +702,13 @@ class SoftwarePlanner extends Plugin
         {
             await copyFolder(templatePath, remoteTaskPath);
             await this.addTaskToSchedule(schedulePath, taskName);
-            await createUpdatedTaskFile(taskFileTemplatePath, taskFilePath, taskName);
+
+            // Replace Title and Checklist placeholders in Auftrag.md
+            let auftragContent = await fs.promises.readFile(taskFileTemplatePath, 'utf8');
+            auftragContent = auftragContent.replace('[Title]', remoteTypeData.title);
+            auftragContent = auftragContent.replace('[Checklist]', remoteTypeData.checklist);
+            await fs.promises.writeFile(taskFilePath, auftragContent, 'utf8');
+
             new Notice(`Remote Auftragsordner erstellt für "${taskName}" am ${date}`);
         }
         catch (error)
@@ -659,6 +717,7 @@ class SoftwarePlanner extends Plugin
             new Notice(`Fehler beim Erstellen des Remote Auftrags: ${error.message}`);
         }
     }
+
 
     // #endregion
 
@@ -669,6 +728,7 @@ class SoftwarePlanner extends Plugin
         const basePath = path.join(this.app.vault.adapter.basePath, this.settings.remoteDayDestinationPath);
         const archivePath = path.join(basePath, '_Archiv');
 
+        // Create archive folder if it doesn't exist
         if (!fs.existsSync(archivePath))
         {
             fs.mkdirSync(archivePath);
@@ -685,12 +745,44 @@ class SoftwarePlanner extends Plugin
             {
                 const sourcePath = path.join(basePath, remoteDay);
                 const destinationPath = path.join(archivePath, remoteDay);
+
+                // Move the folder into the archive
                 fs.renameSync(sourcePath, destinationPath);
+
+                // After moving, update links in the Zeitplan.md to include the _Archiv path
+                const archivedZeitplanPath = path.join(destinationPath, 'Zeitplan.md');
+
+                if (fs.existsSync(archivedZeitplanPath))
+                {
+                    try
+                    {
+                        let zeitplanContent = fs.readFileSync(archivedZeitplanPath, 'utf8');
+
+                        // Escape regex special characters in the remoteDayDestinationPath
+                        const escapeRegex = str => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                        const basePathEscaped = escapeRegex(this.settings.remoteDayDestinationPath.replace(/\\/g, '/'));
+
+                        // This regex looks for links like [[...basePath.../YYYY-MM-DD/...]]
+                        // We insert "/_Archiv" between basePath and YYYY-MM-DD.
+                        const oldRegex = new RegExp(`(\\[\\[${basePathEscaped})/(\\d{4}-\\d{2}-\\d{2})/`, 'g');
+
+                        // Replace with [[...basePath.../_Archiv/YYYY-MM-DD/...
+                        zeitplanContent = zeitplanContent.replace(oldRegex, `$1/_Archiv/$2/`);
+
+                        fs.writeFileSync(archivedZeitplanPath, zeitplanContent, 'utf8');
+                        console.log(`Links in ${archivedZeitplanPath} updated to point to _Archiv.`);
+                    }
+                    catch (err)
+                    {
+                        console.error(`Fehler beim Aktualisieren der Links in ${archivedZeitplanPath}: ${err.message}`);
+                    }
+                }
             }
         }
 
         new Notice('Archivierung abgeschlossen.');
     }
+
 
     async checkRemoteTasks()
     {
@@ -1090,6 +1182,41 @@ class SoftwarePlanner extends Plugin
         return { title: chosen, checklist: content };
     }
 
+    async promptRemoteType()
+    {
+        if (!this.settings.remoteTypesPath)
+        {
+            new Notice('Remote-Typ-Verzeichnis ist nicht definiert. Bitte in den Einstellungen setzen.');
+            return null;
+        }
+
+        const typesBasePath = path.join(this.app.vault.adapter.basePath, this.settings.remoteTypesPath);
+        if (!fs.existsSync(typesBasePath))
+        {
+            new Notice('Remote-Typ-Verzeichnis existiert nicht.');
+            return null;
+        }
+
+        const files = getFilesInFolder(typesBasePath);
+        if (files.length === 0)
+        {
+            new Notice('Keine Remote-Typ-Dateien gefunden.');
+            return null;
+        }
+
+        const options = files.map(file => path.parse(file).name);
+        const chosen = await this.promptDropdown('Remote-Typ wählen', options);
+        if (!chosen) return null;
+
+        const chosenFile = files.find(f => path.parse(f).name === chosen);
+        if (!chosenFile) return null;
+
+        const chosenFilePath = path.join(typesBasePath, chosenFile);
+        const content = await fs.promises.readFile(chosenFilePath, 'utf8');
+
+        return { title: chosen, checklist: content };
+    }
+
     async addTaskToSchedule(schedulePath, taskName)
     {
         let scheduleContent = await fs.promises.readFile(schedulePath, 'utf8');
@@ -1150,6 +1277,52 @@ class SoftwarePlanner extends Plugin
         {
             new Notice('Einsatz.md nicht gefunden.');
         }
+    }
+
+    async openRemoteSchedule(dateStr)
+    {
+        const baseVaultPath = this.app.vault.adapter.basePath;
+        const remoteDayBasePath = path.join(baseVaultPath, this.settings.remoteDayDestinationPath);
+
+        let remoteDayPath = path.join(remoteDayBasePath, dateStr);
+        let scheduleFilePath = path.join(remoteDayPath, 'Zeitplan.md');
+
+        // If Zeitplan.md not found in the main folder, check the archive folder
+        if (!fs.existsSync(scheduleFilePath))
+        {
+            remoteDayPath = path.join(remoteDayBasePath, '_Archiv', dateStr);
+            scheduleFilePath = path.join(remoteDayPath, 'Zeitplan.md');
+        }
+
+        if (!fs.existsSync(scheduleFilePath))
+        {
+            new Notice('Zeitplan.md existiert nicht.');
+            return;
+        }
+
+        const filePathInVault = path.relative(baseVaultPath, scheduleFilePath).replace(/\\/g, '/');
+        const file = this.app.vault.getAbstractFileByPath(filePathInVault);
+
+        if (file && file instanceof TFile)
+        {
+            await this.app.workspace.getLeaf().openFile(file);
+            // Close the calendar if open
+            if (this.calendarModalInstance)
+            {
+                this.calendarModalInstance.close();
+                this.calendarModalInstance = null;
+            }
+        }
+        else
+        {
+            new Notice('Zeitplan.md nicht gefunden.');
+        }
+    }
+
+    openCreateModal(dateStr)
+    {
+        const modal = new ChooseActionModal(this.app, dateStr, this);
+        modal.open();
     }
 
 
@@ -1590,7 +1763,7 @@ class ConfirmModal extends Modal
 
 // #endregion
 
-// #region Calendar and Info Modals (No logic changed, just cleaned up spacing and comments)
+// #region Calendar and Info Modals
 
 class CalendarModal extends Modal
 {
