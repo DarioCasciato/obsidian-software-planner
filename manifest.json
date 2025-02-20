@@ -1,7 +1,7 @@
 {
     "id": "software-planner",
     "name": "Obsidian Software Planner",
-    "version": "1.0.0",
+    "version": "1.2.0",
     "minAppVersion": "0.12.0",
     "description": "Plugin to Organize Software Technician on-site deployments & Remote maintenance",
     "author": "Dario Casciato",
