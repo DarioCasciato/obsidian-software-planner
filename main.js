@@ -503,39 +503,121 @@ class SoftwarePlanner extends Plugin
         }
     }
 
-    async finishDeploymentCreation(customerName, deploymentDates, deploymentTypeData)
-    {
+    async finishDeploymentCreation(customerName, deploymentDates, deploymentTypeData) {
+        console.log(`[finishDeploymentCreation] Starting for customer "${customerName}"`);
+
         const folderName = deploymentDates.endDate
             ? `${deploymentDates.startDate} - ${deploymentDates.endDate}`
             : deploymentDates.startDate;
 
-        const customerPath = path.join(
+        const customerDir = path.join(
             this.app.vault.adapter.basePath,
             this.settings.customerDestinationPath,
-            customerName,
-            '1. Einsätze',
-            folderName
+            customerName
         );
+        const deploymentsDir = path.join(customerDir, '1. Einsätze');
+
+        const newDeploymentPath = path.join(deploymentsDir, folderName);
         const templatePath = path.join(this.app.vault.adapter.basePath, this.settings.deploymentTemplatePath);
 
-        try
-        {
-            await copyFolder(templatePath, customerPath);
+        // Convert startDate to a Date object
+        const newDate = new Date(deploymentDates.startDate); // Ensures correct date comparison
+
+        try {
+            // 1) Copy template
+            await copyFolder(templatePath, newDeploymentPath);
+            console.log(`[finishDeploymentCreation] Copied template to: ${newDeploymentPath}`);
+
+            // 2) Fill date & deployment type placeholders
+            const einsatzFilePath = path.join(newDeploymentPath, 'Einsatz.md');
             await this.updateEinsatzMd(
-                path.join(customerPath, 'Einsatz.md'),
+                einsatzFilePath,
                 customerName,
                 deploymentDates.startDate,
                 deploymentTypeData.title,
                 deploymentTypeData.checklist
             );
+            console.log(`[finishDeploymentCreation] Called updateEinsatzMd on: ${einsatzFilePath}`);
+
+            // 3) Attempt to read data from the newest older deployment
+            const newestFilePath = this.getNewestDeploymentMdFile(customerName, newDate);
+            console.log(`[finishDeploymentCreation] getNewestDeploymentMdFile result: `, newestFilePath);
+
+            if (newestFilePath && fs.existsSync(newestFilePath)) {
+                console.log(`[finishDeploymentCreation] Found an older deployment: ${newestFilePath}`);
+
+                const oldContent = fs.readFileSync(newestFilePath, 'utf8');
+                const oldData = this.parseCustomerData(oldContent);
+
+                console.log(`[finishDeploymentCreation] parseCustomerData returned:`, oldData);
+
+                let newContent = fs.readFileSync(einsatzFilePath, 'utf8');
+                newContent = this.fillCustomerData(newContent, oldData);
+
+                console.log(`[finishDeploymentCreation] fillCustomerData output:\n`, newContent);
+
+                fs.writeFileSync(einsatzFilePath, newContent, 'utf8');
+                console.log(`[finishDeploymentCreation] Overwrote new file with old data successfully.`);
+            } else {
+                console.log(`[finishDeploymentCreation] No older deployment found or the file does not exist.`);
+            }
+
             new Notice(`Einsatz erstellt für ${customerName} vom ${folderName}`);
-        }
-        catch (error)
-        {
+        } catch (error) {
             console.error(`Fehler beim Erstellen des Einsatzes: ${error.message}`);
             new Notice(`Fehler beim Erstellen des Einsatzes: ${error.message}`);
         }
     }
+
+    fillCustomerData(newContent, oldData)
+    {
+        console.log('[fillCustomerData] Replacing sections with:', oldData);
+
+        // Replace Ort: Ensure that the header and the inserted content remain on the same line.
+        newContent = newContent.replace(
+            /(\*\*Ort\*\*:\s*)([\s\S]*?)(?=\n-----|\n##|$)/,
+            (match, prefix) => {
+                return `${prefix}${(oldData.ort || '').trim()}`;
+            }
+        );
+
+        // Replace Kunde Kontaktpersonen:
+        newContent = newContent.replace(
+            /(\*\*Kunde Kontaktpersonen\*\*:\s*)([\s\S]*?)(?=\n-----|\n##|$)/,
+            (match, prefix) => {
+                return `${prefix}${(oldData.kontakt || '').trim()}`;
+            }
+        );
+
+        // Replace Remote Zugang block:
+        newContent = newContent.replace(
+            /(## Remote Zugang\s*)([\s\S]*?)(?=\n-----|\n##|$)/,
+            (match, prefix) => {
+                return `${prefix}${(oldData.remoteZugang || '').trim()}`;
+            }
+        );
+
+        // Replace PL line:
+        newContent = newContent.replace(
+            /(\*\*PL\*\*\s*:\s*)(.*?)(\r?\n)/,
+            (match, p1, p2, p3) => {
+                return `${p1}${(oldData.projektleitung || '').trim()}${p3}`;
+            }
+        );
+
+        // Replace Info-Ablage line:
+        newContent = newContent.replace(
+            /(\*\*Info-Ablage\*\*:\s*)(.*?)(\r?\n)/,
+            (match, p1, p2, p3) => {
+                return `${p1}${(oldData.infoAblage || '').trim()}${p3}`;
+            }
+        );
+
+        console.log('[fillCustomerData] Final merged content:\n', newContent);
+        return newContent;
+    }
+
+
 
     // #endregion
 
@@ -917,6 +999,112 @@ class SoftwarePlanner extends Plugin
         return inProgressTasks;
     }
 
+    parseCustomerData(einsatzContent)
+    {
+        console.log('[parseCustomerData] Begin parsing fields...');
+
+        function captureBlock(regex)
+        {
+            const match = einsatzContent.match(regex);
+            if (match && match[1])
+            {
+                return match[1].trim();
+            }
+            return '';
+        }
+
+        // Capture "Ort" block: all text after "**Ort**:" until a horizontal rule, a new heading, or end-of-file.
+        const ort = captureBlock(/\*\*Ort\*\*:\s*([\s\S]*?)(?=\n-----|\n##|$)/);
+
+        // Capture "Kunde Kontaktpersonen" block.
+        const kontakt = captureBlock(/\*\*Kunde Kontaktpersonen\*\*:\s*([\s\S]*?)(?=\n-----|\n##|$)/);
+
+        // Capture "Remote Zugang" block. (Assumes the heading "## Remote Zugang" exists.)
+        const remoteZugang = captureBlock(/## Remote Zugang\s*([\s\S]*?)(?=\n-----|\n##|$)/);
+
+        // Capture "PL" (Projektleitung) from the "**PL** :" line.
+        let projektleitung = '';
+        const plMatch = einsatzContent.match(/\*\*PL\*\*\s*:\s*(.*?)\r?\n/);
+        if (plMatch && plMatch[1])
+        {
+            projektleitung = plMatch[1].trim();
+        }
+
+        // Capture "Info-Ablage" block.
+        const infoAblage = captureBlock(/\*\*Info-Ablage\*\*:\s*([\s\S]*?)(?=\n-----|\n##|$)/);
+
+        console.log('[parseCustomerData] ort =>', ort);
+        console.log('[parseCustomerData] kontakt =>', kontakt);
+        console.log('[parseCustomerData] remoteZugang =>', remoteZugang);
+        console.log('[parseCustomerData] projektleitung =>', projektleitung);
+        console.log('[parseCustomerData] infoAblage =>', infoAblage);
+
+        return {
+            ort,
+            kontakt,
+            remoteZugang,
+            projektleitung,
+            infoAblage
+        };
+    }
+
+
+
+    getNewestDeploymentMdFile(customerName, maxDate)
+    {
+        const customerPath = path.join(
+            this.app.vault.adapter.basePath,
+            this.settings.customerDestinationPath,
+            customerName,
+            '1. Einsätze'
+        );
+        if (!fs.existsSync(customerPath))
+        {
+            return null; // no deployments at all
+        }
+
+        const folders = getExistingFolders(customerPath);
+
+        let newest = null;
+        let newestTime = -Infinity;
+
+        for (const folderName of folders)
+        {
+            // parse the date from the start
+            const dateMatch = folderName.match(/^(\d{4}-\d{2}-\d{2})/);
+            if (!dateMatch) continue;
+
+            const dateStr = dateMatch[1]; // e.g. "2024-10-18"
+            const parsedDate = new Date(dateStr);
+            if (isNaN(parsedDate)) continue;
+
+            // 1) skip if parsedDate >= maxDate
+            if (parsedDate.getTime() >= maxDate.getTime())
+            {
+                // skip any folder that is the same or newer than the new deployment date
+                continue;
+            }
+
+            // 2) pick the largest date that is still < maxDate
+            if (parsedDate.getTime() > newestTime)
+            {
+                newestTime = parsedDate.getTime();
+                newest = folderName;
+            }
+        }
+
+        if (!newest) return null; // none older than maxDate
+
+        const einsatzMdPath = path.join(customerPath, newest, 'Einsatz.md');
+        if (!fs.existsSync(einsatzMdPath))
+        {
+            return null;
+        }
+
+        return einsatzMdPath;
+    }
+
+
     // #endregion
 
     // #region Update Einsatz File
@@ -939,6 +1127,7 @@ class SoftwarePlanner extends Plugin
             new Notice(`Fehler beim Aktualisieren der Einsatz.md: ${error.message}`);
         }
     }
+
 
     // #endregion
 
