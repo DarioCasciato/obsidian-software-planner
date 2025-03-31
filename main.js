@@ -16,7 +16,9 @@ const DEFAULT_SETTINGS = {
     remoteTaskTemplatePath: '',
     xmlProgramPath: '',
     deploymentTypesPath: '',
-    remoteTypesPath: ''
+    remoteTypesPath: '',
+    // Neue Einstellung für Piketteinsatz Template
+    pikettTemplatePath: ''
 };
 
 // #endregion
@@ -165,6 +167,8 @@ class SoftwarePlannerSettingTab extends PluginSettingTab
         containerEl.createEl('h3', { text: 'Software Einstellungen' });
         this.addPathSetting(containerEl, 'Kunden Vorlagenpfad', 'customerTemplatePath');
         this.addPathSetting(containerEl, 'Kundeneinsatz Vorlagenpfad', 'deploymentTemplatePath');
+        // Neuer Eintrag für Piketteinsatz Vorlage
+        this.addPathSetting(containerEl, 'Piketteinsatz Vorlagenpfad', 'pikettTemplatePath');
         this.addPathSetting(containerEl, 'Kunden Zielverzeichnispfad', 'customerDestinationPath');
 
         // Einsatztypen Verzeichnis
@@ -368,6 +372,13 @@ class SoftwarePlanner extends Plugin
             name: 'Planner-Kalender öffnen',
             callback: () => this.openCalendar()
         });
+
+        // Neuer Command für Piketteinsatz
+        this.addCommand({
+            id: 'create-new-piketteinsatz',
+            name: 'Neuen Piketteinsatz erstellen',
+            callback: () => this.createNewPiketteinsatz()
+        });
     }
 
     createRibbonIcons()
@@ -386,6 +397,10 @@ class SoftwarePlanner extends Plugin
         this.addRibbonIcon('check', 'Check Remote Aufträge', () => this.checkRemoteTasks());
         this.addRibbonIcon('archive', 'Alte Remote-Tage archivieren', () => this.archiveOldRemoteDays());
         this.addRibbonIcon('calendar', 'Planner-Kalender öffnen', () => this.openCalendar());
+
+        // Neues Ribbon Icon für Piketteinsatz (gelb markiert)
+        const pikettIcon = this.addRibbonIcon('exclamation-triangle', 'Neuer Piketteinsatz', () => this.createNewPiketteinsatz());
+        pikettIcon.addClass('pikett-icon');
     }
 
     // #endregion
@@ -537,6 +552,63 @@ class SoftwarePlanner extends Plugin
         }
     }
 
+    // Neue Methoden für Piketteinsatz
+    async createNewPiketteinsatz()
+    {
+        if (!this.settings.pikettTemplatePath || !this.settings.customerDestinationPath)
+        {
+            new Notice('Setze die Piketteinsatz Vorlage und den Kundenzielpfad in den Einstellungen.');
+            return;
+        }
+
+        const customers = getExistingFolders(path.join(this.app.vault.adapter.basePath, this.settings.customerDestinationPath));
+        const customerName = await this.promptDropdown('Kunden wählen', customers, false, null, true, async (newCustomerName) =>
+        {
+            await this.createNewCustomerWithName(newCustomerName);
+        });
+        if (!customerName) return;
+
+        const deploymentDates = await this.promptDateRange('Datum des Piketteinsatzes angeben (YYYY-MM-DD)');
+        if (!deploymentDates) return;
+
+        await this.finishPiketteinsatzCreation(customerName, deploymentDates);
+    }
+
+    async finishPiketteinsatzCreation(customerName, deploymentDates)
+    {
+        // Ordnername mit "P_" als Präfix
+        const folderName = deploymentDates.endDate
+            ? `P_${deploymentDates.startDate} - ${deploymentDates.endDate}`
+            : `P_${deploymentDates.startDate}`;
+
+        const customerPath = path.join(
+            this.app.vault.adapter.basePath,
+            this.settings.customerDestinationPath,
+            customerName,
+            '1. Einsätze',
+            folderName
+        );
+        const templatePath = path.join(this.app.vault.adapter.basePath, this.settings.pikettTemplatePath);
+
+        try
+        {
+            await copyFolder(templatePath, customerPath);
+            await this.updateEinsatzMd(
+                path.join(customerPath, 'Einsatz.md'),
+                customerName,
+                deploymentDates.startDate,
+                'Piketteinsatz', // fester Titel
+                '' // keine Checkliste
+            );
+            new Notice(`Piketteinsatz erstellt für ${customerName} vom ${folderName}`);
+        }
+        catch (error)
+        {
+            console.error(`Fehler beim Erstellen des Piketteinsatzes: ${error.message}`);
+            new Notice(`Fehler beim Erstellen des Piketteinsatzes: ${error.message}`);
+        }
+    }
+
     // #endregion
 
     // #region Remote Day and Task Creation
@@ -611,6 +683,25 @@ class SoftwarePlanner extends Plugin
             this.calendarModalInstance.refreshCalendar();
         }
     }
+
+    // Neue Methode in der SoftwarePlanner-Klasse
+    async createNewPiketteinsatzWithDate(date)
+    {
+        // Nutze das angeklickte Datum als Vorgabe
+        const deploymentDates = await this.promptDateRange('Datum des Piketteinsatzes angeben (YYYY-MM-DD)', date);
+        if (!deploymentDates) return;
+
+        const customers = getExistingFolders(path.join(this.app.vault.adapter.basePath, this.settings.customerDestinationPath));
+        const customerName = await this.promptDropdown('Kunden wählen', customers, false, null, true, async (newCustomerName) =>
+        {
+            await this.createNewCustomerWithName(newCustomerName);
+        });
+
+        if (!customerName) return;
+
+        await this.finishPiketteinsatzCreation(customerName, deploymentDates);
+    }
+
 
     async createNewRemoteTask()
     {
@@ -1065,7 +1156,7 @@ class SoftwarePlanner extends Plugin
 
             for (const deployment of deployments)
             {
-                const dateRangeRegex = /^(\d{4}-\d{2}-\d{2})(?:\s*-\s*(\d{4}-\d{2}-\d{2}))?$/;
+                const dateRangeRegex = /^(?:P_)?(\d{4}-\d{2}-\d{2})(?:\s*-\s*(\d{4}-\d{2}-\d{2}))?$/;
                 const match = deployment.match(dateRangeRegex);
 
                 if (match)
@@ -1975,6 +2066,7 @@ class CalendarModal extends Modal
                 const dayDeployments = deployments[dateStr] || [];
                 const isRemoteDay = remoteDays[dateStr];
 
+                // Innerhalb von renderCalendar() in CalendarModal, ersetze den bisherigen Code zur Erstellung der Einsatz-Events:
                 if (dayDeployments.length > 0 || isRemoteDay)
                 {
                     const eventsEl = dayEl.createEl('div', { cls: 'day-events' });
@@ -1988,21 +2080,25 @@ class CalendarModal extends Modal
                     for (const deployment of dayDeployments)
                     {
                         let eventClass;
-                        if (deployment.completed)
+                        if (deployment.isPikett)
                         {
-                            eventClass = 'deployment-completed-event';
+                            // Für Piketteinsätze: Solange "- [x] **Auftrag abgeschlossen**" nicht vorhanden ist, immer gelb
+                            eventClass = deployment.completed ? 'deployment-completed-event' : 'pikett-event';
                         }
                         else
                         {
-                            eventClass = deployment.preCheckDone ? 'deployment-event' : 'deployment-new-event';
+                            eventClass = deployment.completed
+                                ? 'deployment-completed-event'
+                                : (deployment.preCheckDone ? 'deployment-event' : 'deployment-new-event');
                         }
-
-                        eventsEl.createEl('div', {
+                        eventsEl.createEl('div',
+                        {
                             text: `${deployment.customerName}`,
                             cls: `event ${eventClass}`
                         });
                     }
                 }
+
 
                 dayEl.addEventListener('click', () =>
                 {
@@ -2080,6 +2176,12 @@ class ChooseActionModal extends Modal
         createRemoteDayButton.addEventListener('click', async () =>
         {
             await this.plugin.createNewRemoteDayWithDate(this.dateStr);
+            this.close();
+        });
+
+        const createPikettButton = buttonContainer.createEl('button', { text: 'Piketteinsatz erstellen' });
+        createPikettButton.addEventListener('click', async () => {
+            await this.plugin.createNewPiketteinsatzWithDate(this.dateStr);
             this.close();
         });
     }
@@ -2348,6 +2450,17 @@ style.textContent = `
 .remote-event {
     background-color: #C71585;
 }
+
+/* Neue Style-Regel für das Piketteinsatz-Ribbon Icon (gelb) */
+.pikett-icon {
+    color: yellow;
+}
+
+.pikett-event {
+    background-color: yellow;
+    color: black;
+}
+
 
 .choose-action-modal .button-container {
     display: flex;
