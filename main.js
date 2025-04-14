@@ -379,6 +379,14 @@ class SoftwarePlanner extends Plugin
             name: 'Neuen Piketteinsatz erstellen',
             callback: () => this.createNewPiketteinsatz()
         });
+
+        this.addCommand({
+            id: 'kundenordner-redirect-erstellen',
+            name: 'Kundenordner Redirect erstellen',
+            editorCallback: (editor, view) => {
+                 this.createKundenordnerRedirect(editor);
+            }
+        });
     }
 
     createRibbonIcons()
@@ -1139,40 +1147,36 @@ class SoftwarePlanner extends Plugin
         this.calendarModalInstance.open();
     }
 
-    getDeploymentDates()
-    {
+    getDeploymentDates() {
         const customerBasePath = path.join(this.app.vault.adapter.basePath, this.settings.customerDestinationPath);
         const customers = getExistingFolders(customerBasePath);
 
         let deploymentDates = {};
-        for (const customer of customers)
-        {
+        for (const customer of customers) {
             const deploymentsPath = path.join(customerBasePath, customer, '1. Einsätze');
-            if (!fs.existsSync(deploymentsPath))
-            {
+            if (!fs.existsSync(deploymentsPath)) {
                 continue;
             }
             const deployments = getExistingFolders(deploymentsPath);
 
-            for (const deployment of deployments)
-            {
+            for (const deployment of deployments) {
+                // Der Regex erlaubt optional ein "P_"-Präfix, liefert aber immer das Datum in der ersten Gruppe
                 const dateRangeRegex = /^(?:P_)?(\d{4}-\d{2}-\d{2})(?:\s*-\s*(\d{4}-\d{2}-\d{2}))?$/;
                 const match = deployment.match(dateRangeRegex);
 
-                if (match)
-                {
+                if (match) {
                     const startDateStr = match[1];
                     const endDateStr = match[2] || startDateStr;
                     const startDate = new Date(startDateStr);
                     const endDate = new Date(endDateStr);
                     const isSingleDay = startDateStr === endDateStr;
+                    const isPikett = deployment.startsWith("P_"); // Flag setzen, wenn Ordnername mit "P_" beginnt
 
                     let currentDate = new Date(startDate);
-                    while (currentDate <= endDate)
-                    {
+                    while (currentDate <= endDate) {
                         const currentDayOfWeek = currentDate.getDay();
-                        if (isSingleDay || (currentDayOfWeek !== 0 && currentDayOfWeek !== 6))
-                        {
+                        // Wenn es ein Ein-Tages-Einsatz ist oder der Tag kein Wochenende (Sonntag=0, Samstag=6) ist:
+                        if (isSingleDay || (currentDayOfWeek !== 0 && currentDayOfWeek !== 6)) {
                             const dateStr = currentDate.toISOString().split('T')[0];
 
                             const einsatzMdPath = path.join(
@@ -1186,8 +1190,7 @@ class SoftwarePlanner extends Plugin
 
                             const { completed, preCheckDone, kurzbeschrieb } = parseEinsatzFile(einsatzMdPath);
 
-                            if (!deploymentDates[dateStr])
-                            {
+                            if (!deploymentDates[dateStr]) {
                                 deploymentDates[dateStr] = [];
                             }
 
@@ -1196,10 +1199,10 @@ class SoftwarePlanner extends Plugin
                                 folderName: deployment,
                                 completed: completed,
                                 preCheckDone: preCheckDone,
-                                kurzbeschrieb: kurzbeschrieb
+                                kurzbeschrieb: kurzbeschrieb,
+                                isPikett: isPikett
                             });
                         }
-
                         currentDate.setDate(currentDate.getDate() + 1);
                     }
                 }
@@ -1207,6 +1210,7 @@ class SoftwarePlanner extends Plugin
         }
         return deploymentDates;
     }
+
 
     getRemoteDates()
     {
@@ -1488,6 +1492,44 @@ class SoftwarePlanner extends Plugin
         modal.open();
     }
 
+    async createKundenordnerRedirect(editor) {
+        // Hole die markierte Zeichenkette und trimme sie
+        let selected = editor.getSelection().trim();
+        if (!selected) {
+            new Notice("Bitte markiere einen Windows-Pfad.");
+            return;
+        }
+
+        // Ersetze Backslashes (\) durch Schrägstriche (/)
+        let normalized = selected.replace(/\\/g, '/');
+
+        // Entferne ggf. das vorhandene "file:///"-Präfix
+        normalized = normalized.replace(/^file:\/+\//, '');
+
+        // Zerlege den Pfad in Segmente
+        let segments = normalized.split('/');
+
+        // Erzeuge aus den Segmenten den finalen Pfad:
+        // – Das erste Segment (Laufwerksbuchstabe, z.B. "T:") wird beibehalten,
+        // – Alle weiteren Segmente werden URL-codiert (damit z.B. Leerzeichen, & oder Umlaute korrekt kodiert werden).
+        for (let i = 0; i < segments.length; i++) {
+            if (i === 0 && /^[A-Za-z]:$/.test(segments[i])) {
+                // Laufwerksbuchstabe beibehalten
+            } else {
+                segments[i] = encodeURIComponent(segments[i]);
+            }
+        }
+
+        // Setze nun das "file:///"-Präfix wieder voran
+        let encodedPath = "file:///" + segments.join('/');
+
+        // Erstelle den Markdown-Link mit dem Namen "Kundenordner"
+        let markdownLink = `[Kundenordner](${encodedPath})`;
+
+        // Ersetze den markierten Text im Editor durch den generierten Link
+        editor.replaceSelection(markdownLink);
+        new Notice("Kundenordner Redirect wurde erstellt.");
+    }
 
     // #endregion
 }
@@ -2080,17 +2122,17 @@ class CalendarModal extends Modal
                     for (const deployment of dayDeployments)
                     {
                         let eventClass;
+
                         if (deployment.isPikett)
                         {
-                            // Für Piketteinsätze: Solange "- [x] **Auftrag abgeschlossen**" nicht vorhanden ist, immer gelb
                             eventClass = deployment.completed ? 'deployment-completed-event' : 'pikett-event';
                         }
                         else
                         {
-                            eventClass = deployment.completed
-                                ? 'deployment-completed-event'
-                                : (deployment.preCheckDone ? 'deployment-event' : 'deployment-new-event');
+                            eventClass = deployment.completed ? 'deployment-completed-event' :
+                                (deployment.preCheckDone ? 'deployment-event' : 'deployment-new-event');
                         }
+
                         eventsEl.createEl('div',
                         {
                             text: `${deployment.customerName}`,
